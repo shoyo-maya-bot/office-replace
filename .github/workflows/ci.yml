@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check . && ruff format --check .
+      - run: pytest -q
+      - name: sample run (dry-run and real)
+        run: |
+          python samples/make_samples.py
+          office-replace samples/input --rules samples/rules.xlsx -r --dry-run
+          office-replace samples/input --rules samples/rules.csv -r -o "$RUNNER_TEMP/out"
+          ls -R "$RUNNER_TEMP/out"

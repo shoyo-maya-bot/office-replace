@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.bas text eol=crlf working-tree-encoding=cp932
+*.cmd text eol=crlf working-tree-encoding=cp932
+*.xlsx binary
+*.docx binary
+*.pptx binary
+*.xls binary
