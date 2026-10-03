@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "office-replace"
 version = "0.1.0"
 description = "Excel / Word / PowerPoint の文字列・図形・シート名・ファイル名をワイルドカードで一括置換する（元ファイルは書き換えない）"
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
