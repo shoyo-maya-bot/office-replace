@@ -248,3 +248,16 @@ def test_save_failure_leaves_no_temp_file(tmp_path: Path, monkeypatch):
     with pytest.raises(OSError):
         pkg.save(dest)
     assert list(dest.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("to", ["../../escaped", "sub/dir", "a:b", "  ", "末尾."])
+def test_file_name_replace_cannot_escape_or_break(tmp_path: Path, to: str):
+    src = tmp_path / "in"
+    src.mkdir()
+    wb = Workbook()
+    wb.save(src / "report_FY.xlsx")
+    out = tmp_path / "out"
+    rc, _ = run(str(src), "--from", "report_FY", "--to", to, "--target", "file", "-o", str(out))
+    assert rc != 0
+    written = [p for p in tmp_path.rglob("*.xlsx") if p.parent != src and not p.name.startswith("office-replace-report")]
+    assert written == []  # 出力フォルダの外にも中にも書かない

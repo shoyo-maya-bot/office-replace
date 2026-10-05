@@ -54,10 +54,32 @@ def new_name(path: Path, rules: list[Rule]) -> tuple[str, int]:
     return stem + path.suffix, total
 
 
+_FORBIDDEN = set('/\\:*?"<>|') | {chr(c) for c in range(32)}
+
+
+def _bad_name(name: str, suffix: str) -> str:
+    """ファイル名の置換の結果が、出力フォルダの外や別のフォルダを指したり、Windows で作れない名前にならないか."""
+    stem = name[: len(name) - len(suffix)] if suffix else name
+    if any(c in _FORBIDDEN for c in name):
+        return 'フォルダの区切りや Windows で使えない文字（\\ / : * ? " < > |）が入っています'
+    if stem.strip(" .") == "":
+        return "空、または「.」だけの名前です"
+    if stem.rstrip() != stem or stem.endswith("."):
+        return "末尾が空白か「.」です（Windows で作れません）"
+    return ""
+
+
 def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: Options) -> FileResult:
     suffix = path.suffix.lower()
     name, renamed = new_name(path, rules)
+    bad = _bad_name(name, path.suffix) if renamed else ""
+    if bad:
+        return FileResult(
+            path, None, "error", messages=[f"置換後のファイル名「{name}」は使えません（{bad}）. 置換表の「置換後」を見直してください"]
+        )
     dest = out_dir / rel.parent / name
+    if not dest.resolve().is_relative_to(out_dir.resolve()):
+        return FileResult(path, None, "error", messages=[f"出力先が出力フォルダの外になります（{name}）"])
     if suffix in LEGACY:
         return FileResult(path, None, "skipped", messages=[f"古い形式（{suffix}）は対象外です。{LEGACY[suffix]} で保存し直してください"])
     if suffix not in SUPPORTED:
