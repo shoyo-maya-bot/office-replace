@@ -229,3 +229,22 @@ def test_copy_all(samples: Path, tmp_path: Path):
     out = tmp_path / "out"
     run(str(samples / "input"), "--from", "存在しない語", "--to", "x", "-r", "--copy-all", "-o", str(out))
     assert (out / "提案書_サンプル商事.docx").exists() and (out / "sub/説明資料_サンプル商事.pptx").exists()
+
+
+def test_save_failure_leaves_no_temp_file(tmp_path: Path, monkeypatch):
+    from office_replace import ooxml
+
+    src = tmp_path / "in.docx"
+    d = Document()
+    d.add_paragraph("x")
+    d.save(src)
+    pkg = ooxml.Package(src)
+    dest = tmp_path / "out" / "in.docx"
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", boom)
+    with pytest.raises(OSError):
+        pkg.save(dest)
+    assert list(dest.parent.iterdir()) == []

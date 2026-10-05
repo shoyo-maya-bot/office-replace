@@ -75,14 +75,18 @@ class Package:
     def save(self, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".tmp")
-        with zipfile.ZipFile(tmp, "w") as out:
-            for info in self.zip.infolist():
-                if info.filename in self.dirty:
-                    data = etree.tostring(self._xml[info.filename], xml_declaration=True, encoding="UTF-8", standalone=True)
-                else:
-                    data = self.zip.read(info.filename)
-                out.writestr(info, data, compress_type=info.compress_type)
-        tmp.replace(dest)
+        try:
+            with zipfile.ZipFile(tmp, "w") as out:
+                for info in self.zip.infolist():
+                    if info.filename in self.dirty:
+                        data = etree.tostring(self._xml[info.filename], xml_declaration=True, encoding="UTF-8", standalone=True)
+                    else:
+                        data = self.zip.read(info.filename)
+                    out.writestr(info, data, compress_type=info.compress_type)
+            tmp.replace(dest)
+        except BaseException:
+            tmp.unlink(missing_ok=True)  # 書きかけの一時ファイルを出力フォルダに残さない
+            raise
 
 
 def paragraphs(root: etree._Element, para_tag: str, text_tag: str) -> list[tuple[etree._Element, list[etree._Element]]]:
