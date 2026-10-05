@@ -87,3 +87,8 @@ ruff check . && ruff format --check . && pytest
 
 構成: `rules.py`（置換表・ワイルドカード）→ `engine.py`（フォルダの走査・出力）→ `processors.py`（Excel / Word / PowerPoint）→
 `textruns.py`（書式の切れ目をまたぐ置換）/ `ooxml.py`（zip と XML の読み書き）→ `report.py`
+
+## セキュリティ・ライセンス
+
+- 脆弱性を見つけたら、公開の Issue ではなく [SECURITY.md](SECURITY.md) の方法で知らせてください
+- ライセンスは [MIT](LICENSE) です
