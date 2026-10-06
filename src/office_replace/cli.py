@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         md
         if args.dry_run
         else f"置換あり {s['changed']} / 置換なし {s['unchanged']} / 対象外 {s['skipped']} / エラー {s['error']}（置換 {s['置換件数']} 件）"
+        + (f"\n注意: 置換前の文字列が {s['残り']} 件残っています（レポートの「残っている文字列」を確認してください）" if s["残り"] else "")
     )
     if report_md:
         print(f"レポート: {report_md} / {report_md.with_suffix('.xlsx')}")

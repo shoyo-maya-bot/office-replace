@@ -7,7 +7,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import processors
+from . import leftover, processors
 from .ooxml import Change, Package
 from .rules import Rule
 
@@ -25,6 +25,7 @@ class FileResult:
     status: str  # changed / unchanged / skipped / error
     changes: list[Change] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
+    leftovers: list[leftover.Leftover] = field(default_factory=list)  # 置換しきれずに残った置換前の文字列（注意）
 
 
 @dataclass
@@ -106,6 +107,9 @@ def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: O
             result.changes += processors.word(pkg, text_rules)
         else:
             result.changes += processors.powerpoint(pkg, text_rules, opt.include_masters)
+        if text_rules:
+            result.changes += processors.chart_caches(pkg, text_rules)
+            result.changes += processors.properties(pkg, text_rules, titles=suffix not in EXCEL)
         if result.changes:
             result.status = "changed"
         if result.messages:
@@ -118,6 +122,14 @@ def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: O
                 shutil.copy2(path, dest)
         elif not result.changes:
             result.dest = None
+        # 置換前の文字列が残っていないか（書き出したときは書き出したファイルを、それ以外は置換後の内容を調べる）
+        check = leftover.scan_rules(rules)
+        if check:
+            if not opt.dry_run and result.dest is not None and result.dest.exists():
+                with zipfile.ZipFile(result.dest) as zf:
+                    result.leftovers = leftover.scan_zip(zf, check)
+            else:
+                result.leftovers = leftover.scan_zip(pkg.zip, check, {n: pkg.xml(n) for n in pkg.dirty})
     finally:
         pkg.close()
     return result

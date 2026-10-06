@@ -22,6 +22,19 @@ NS = {
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
     "xdr": "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
     "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    # 文書のプロパティ
+    "cp": "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "ep": "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
+    "op": "http://schemas.openxmlformats.org/officeDocument/2006/custom-properties",
+    "vt": "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes",
+    # Excel の拡張（入力規則・条件付き書式）とスレッド形式のコメント
+    "x14": "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main",
+    "xm": "http://schemas.microsoft.com/office/excel/2006/main",
+    "tc": "http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments",
+    # PowerPoint の新しいコメント、Word のコメントの作成者
+    "p188": "http://schemas.microsoft.com/office/powerpoint/2018/8/main",
+    "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
 }
 _PARSER = etree.XMLParser(remove_blank_text=False, huge_tree=True, resolve_entities=False, no_network=True)
 

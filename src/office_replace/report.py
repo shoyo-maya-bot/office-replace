@@ -19,6 +19,7 @@ def summary(results: list[FileResult]) -> dict[str, int]:
     for r in results:
         out[r.status] += 1
     out["置換件数"] = sum(c.count for r in results for c in r.changes)
+    out["残り"] = sum(x.count for r in results for x in r.leftovers)
     return out
 
 
@@ -35,6 +36,7 @@ def markdown(results: list[FileResult], *, dry_run: bool, src: Path, out: Path) 
         f"- 出力: {out if not dry_run else '（試行のため書き出しなし）'}",
         f"- ファイル: 置換あり {s['changed']} / 置換なし {s['unchanged']} / 対象外 {s['skipped']} / エラー {s['error']}",
         f"- 置換: {s['置換件数']} 件",
+        f"- 置換しきれずに残った置換前の文字列: {s['残り']} 件" + ("（下の「残っている文字列」を確認してください）" if s["残り"] else ""),
         "",
     ]
     errs = [(r, m) for r in results for m in r.messages if r.status in ("error", "changed")]
@@ -48,6 +50,22 @@ def markdown(results: list[FileResult], *, dry_run: bool, src: Path, out: Path) 
         lines += [
             f"| {_cell(r.source.name)} | {KIND.get(c.kind, c.kind)} | {_cell(c.location)} | {_cell(c.before)} | {_cell(c.after)} | {c.count} |"
             for r, c in rows
+        ]
+        lines.append("")
+    left = [(r, x) for r in results for x in r.leftovers]
+    if left:
+        lines += [
+            "## 残っている文字列（注意）",
+            "",
+            "置換後のファイルの中に、置換前の文字列がまだあります（数式の中の文字列・変更履歴・グラフの元データなど、このツールが置換しない場所）。",
+            "固有名を伏せる目的のときは、Office で開いて確認してください。",
+            "",
+            "| ファイル | 種類 | 部品 | 場所 | 置換前 | 件数 |",
+            "|---|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {_cell(r.source.name)} | {x.rule_id} | {_cell(x.part)} | {_cell(x.where)} | {_cell(x.before)} | {x.count} |"
+            for r, x in left
         ]
         lines.append("")
     skipped = [r for r in results if r.status == "skipped" and r.messages and "古い形式" in r.messages[0]]
@@ -84,6 +102,12 @@ def excel(results: list[FileResult], path: Path) -> None:
         ["ファイル", "種類", "場所", "置換前", "置換後", "件数"],
         [[r.source.name, KIND.get(c.kind, c.kind), c.location, c.before, c.after, c.count] for r in results for c in r.changes],
         [30, 10, 30, 50, 50, 8],
+    )
+    sheet(
+        wb.create_sheet("残り"),
+        ["ファイル", "種類", "部品", "場所", "置換前", "件数"],
+        [[r.source.name, x.rule_id, x.part, x.where, x.before, x.count] for r in results for x in r.leftovers],
+        [30, 18, 40, 30, 30, 8],
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)

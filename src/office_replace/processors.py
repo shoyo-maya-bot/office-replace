@@ -53,6 +53,108 @@ def _shape_name(el: etree._Element) -> str:
     return ""
 
 
+def _replace_value(pkg: Package, part: str, el: etree._Element, rules: list[Rule], location: str, attr: str | None = None) -> list[Change]:
+    """要素の文字（attr を指定したときは属性の値）を 1 つの文字列として置換する."""
+    old = el.get(attr) if attr else el.text
+    if not old:
+        return []
+    (new,), count = replace_all([old], rules)
+    if not count:
+        return []
+    if attr:
+        el.set(attr, new)
+    else:
+        set_text(el, new)
+    pkg.touch(part)
+    return [Change(pkg.path.name, "text", location, _short(old), _short(new), count)]
+
+
+def _parts(pkg: Package, pattern: str) -> list[str]:
+    return sorted(n for n in pkg.names if re.fullmatch(pattern, n))
+
+
+def _root_is(pkg: Package, part: str, prefix: str, tag: str) -> bool:
+    try:
+        return pkg.xml(part).getroot().tag == _q(prefix, tag)
+    except etree.XMLSyntaxError:
+        return False
+
+
+def _related(pkg: Package, sources: list[tuple[str, str]], word: str) -> dict[str, str]:
+    """（ラベル, 部品）の一覧から、名前に word を含む関係先の部品 → ラベル."""
+    out: dict[str, str] = {}
+    for label, part in sources:
+        for target in pkg.rels(part).values():
+            if word in target.lower():
+                out.setdefault(target, label)
+    return out
+
+
+# --- 文書のプロパティ・グラフのデータ（Excel / Word / PowerPoint 共通） ----------------------------------
+
+CORE_FIELDS = {
+    ("dc", "title"): "タイトル",
+    ("dc", "subject"): "件名",
+    ("dc", "creator"): "作成者",
+    ("cp", "keywords"): "キーワード",
+    ("dc", "description"): "コメント",
+    ("cp", "lastModifiedBy"): "最終更新者",
+    ("cp", "category"): "分類",
+}
+APP_FIELDS = {"Company": "会社", "Manager": "管理者"}
+
+
+def properties(pkg: Package, rules: list[Rule], titles: bool) -> list[Change]:
+    """文書のプロパティ（タイトル・作成者・会社など）. titles: 「パーツのタイトル」（スライドの題など）も置換する."""
+    changes: list[Change] = []
+    if pkg.has("docProps/core.xml"):
+        root = pkg.xml("docProps/core.xml").getroot()
+        for (prefix, tag), label in CORE_FIELDS.items():
+            for el in root.iterfind(f"{prefix}:{tag}", NS):
+                changes += _replace_value(pkg, "docProps/core.xml", el, rules, f"文書のプロパティ（{label}）")
+    if pkg.has("docProps/app.xml"):
+        root = pkg.xml("docProps/app.xml").getroot()
+        for tag, label in APP_FIELDS.items():
+            for el in root.iterfind(f"ep:{tag}", NS):
+                changes += _replace_value(pkg, "docProps/app.xml", el, rules, f"文書のプロパティ（{label}）")
+        if titles:  # Excel ではシート名の一覧なので、シート名の変更に合わせて別に直す
+            for el in root.iterfind("ep:TitlesOfParts/vt:vector/vt:lpstr", NS):
+                changes += _replace_value(pkg, "docProps/app.xml", el, rules, "文書のプロパティ（パーツのタイトル）")
+    if pkg.has("docProps/custom.xml"):
+        for prop in pkg.xml("docProps/custom.xml").getroot().iterfind("op:property", NS):
+            for el in prop.iterfind("vt:lpwstr", NS):
+                changes += _replace_value(
+                    pkg, "docProps/custom.xml", el, rules, f"文書のプロパティ（ユーザー設定「{prop.get('name', '')}」）"
+                )
+    return changes
+
+
+_STR_CACHES = {_q("c", "strCache"), _q("c", "multiLvlStrCache")}
+
+
+def chart_caches(pkg: Package, rules: list[Rule]) -> list[Change]:
+    """グラフに保存されている項目名・系列名（c:strCache / c:tx の c:v）. 数値（c:numCache）は変えない."""
+    changes: list[Change] = []
+    for part in _parts(pkg, r"(xl|word|ppt)/charts/chart[^/]*\.xml"):
+        label = f"グラフ {posixpath.basename(part).removesuffix('.xml')} の項目名・系列名"
+        for v in pkg.xml(part).getroot().iter(_q("c", "v")):
+            parent = v.getparent()
+            in_cache = any(a.tag in _STR_CACHES for a in v.iterancestors())
+            if in_cache or (parent is not None and parent.tag == _q("c", "tx")):
+                changes += _replace_value(pkg, part, v, rules, label)
+    return changes
+
+
+def _drop_phonetic(container: etree._Element) -> None:
+    """ふりがな（rPh）を外す. 置換した文字列に元の読みが残ると、固有名が読めてしまうため."""
+    for rph in container.findall("s:rPh", NS):
+        container.remove(rph)
+
+
+def _not_phonetic(t: etree._Element) -> bool:
+    return not any(a.tag == _q("s", "rPh") for a in t.iterancestors())
+
+
 # --- Excel --------------------------------------------------------------------------------------
 
 
@@ -85,12 +187,13 @@ def excel(pkg: Package, text_rules: list[Rule], sheet_rules: list[Rule]) -> tupl
         if pkg.has("xl/sharedStrings.xml"):
             root = pkg.xml("xl/sharedStrings.xml").getroot()
             for idx, si in enumerate(root.iterfind("s:si", NS)):
-                ts = [t for t in si.iter(_q("s", "t")) if not any(a.tag == _q("s", "rPh") for a in t.iterancestors())]
+                ts = [t for t in si.iter(_q("s", "t")) if _not_phonetic(t)]
                 pieces = [t.text or "" for t in ts]
                 new, count = replace_all(pieces, text_rules)
                 if count:
                     for t, v in zip(ts, new, strict=True):
                         set_text(t, v)
+                    _drop_phonetic(si)
                     pkg.touch("xl/sharedStrings.xml")
                     cells = used.get(idx, [])
                     loc = (
@@ -104,12 +207,14 @@ def excel(pkg: Package, text_rules: list[Rule], sheet_rules: list[Rule]) -> tupl
                 continue
             root = pkg.xml(part).getroot()
             for c in root.iterfind(".//s:sheetData/s:row/s:c[@t='inlineStr']", NS):
-                ts = list(c.iter(_q("s", "t")))
+                ts = [t for t in c.iter(_q("s", "t")) if _not_phonetic(t)]
                 pieces = [t.text or "" for t in ts]
                 new, count = replace_all(pieces, text_rules)
                 if count:
                     for t, v in zip(ts, new, strict=True):
                         set_text(t, v)
+                    for is_ in c.iterfind("s:is", NS):
+                        _drop_phonetic(is_)
                     pkg.touch(part)
                     changes.append(
                         Change(pkg.path.name, "text", f"{name}!{c.get('r', '')}", _short("".join(pieces)), _short("".join(new)), count)
@@ -124,11 +229,44 @@ def excel(pkg: Package, text_rules: list[Rule], sheet_rules: list[Rule]) -> tupl
                             changes += _replace_paragraphs(
                                 pkg, t2, _q("a", "p"), _q("a", "t"), text_rules, lambda p, n, nm=name: f"{nm} グラフ"
                             )
+        changes += _excel_comments(pkg, sheets, text_rules)
     if sheet_rules:
         c2, e2 = _rename_sheets(pkg, sheets, sheet_rules)
         changes += c2
         errors += e2
     return changes, errors
+
+
+def _excel_comments(pkg: Package, sheets, rules: list[Rule]) -> list[Change]:
+    """セルのコメント（従来のメモ・スレッド形式）とその作成者."""
+    changes: list[Change] = []
+    owner = _related(pkg, [(name, part) for name, part, _ in sheets], "comment")
+    for part in _parts(pkg, r"(?i)xl/.*comment[^/]*\.xml"):
+        sheet = owner.get(part, "")
+        if _root_is(pkg, part, "s", "comments"):
+            root = pkg.xml(part).getroot()
+            for c in root.iterfind("s:commentList/s:comment", NS):
+                ts = [t for t in c.iter(_q("s", "t")) if _not_phonetic(t)]
+                pieces = [t.text or "" for t in ts]
+                new, count = replace_all(pieces, rules)
+                if count:
+                    for t, v in zip(ts, new, strict=True):
+                        set_text(t, v)
+                    for text in c.iterfind("s:text", NS):
+                        _drop_phonetic(text)
+                    pkg.touch(part)
+                    loc = f"{sheet}!{c.get('ref', '')} コメント"
+                    changes.append(Change(pkg.path.name, "text", loc, _short("".join(pieces)), _short("".join(new)), count))
+            for a in root.iterfind("s:authors/s:author", NS):
+                changes += _replace_value(pkg, part, a, rules, f"{sheet} コメントの作成者")
+        elif _root_is(pkg, part, "tc", "ThreadedComments"):
+            for c in pkg.xml(part).getroot().iterfind("tc:threadedComment", NS):
+                for text in c.iterfind("tc:text", NS):
+                    changes += _replace_value(pkg, part, text, rules, f"{sheet}!{c.get('ref', '')} コメント（スレッド）")
+    for part in _parts(pkg, r"xl/persons/[^/]*\.xml"):
+        for person in pkg.xml(part).getroot().iterfind("tc:person", NS):
+            changes += _replace_value(pkg, part, person, rules, "コメントの作成者（スレッド）", attr="displayName")
+    return changes
 
 
 def _apply_simple(rules: list[Rule], text: str) -> tuple[str, int]:
@@ -177,18 +315,57 @@ def _rename_sheets(pkg: Package, sheets, rules: list[Rule]) -> tuple[list[Change
     def fix(text: str) -> str:
         return pattern.sub(lambda m: mapping[m.group(0)], text)
 
-    targets = [("xl/workbook.xml", ".//s:definedNames/s:definedName")]
-    targets += [(part, ".//s:c/s:f") for _, part, _ in sheets if pkg.has(part)]
-    targets += [(n, ".//c:f") for n in pkg.names if n.startswith("xl/charts/chart") and n.endswith(".xml")]
+    # 入力規則（dataValidation の formula1/2）・条件付き書式（cfRule の formula）は、Excel 2010 以降の拡張（extLst の xm:f）にもある
+    sheet_xpaths = [
+        ".//s:c/s:f",
+        ".//s:dataValidations/s:dataValidation/s:formula1",
+        ".//s:dataValidations/s:dataValidation/s:formula2",
+        ".//s:conditionalFormatting/s:cfRule/s:formula",
+        ".//xm:f",
+    ]
+    targets = [("xl/workbook.xml", ".//s:definedNames/s:definedName", None)]
+    for _, part, _ in sheets:
+        if pkg.has(part):
+            targets += [(part, x, None) for x in sheet_xpaths]
+            targets += [(part, ".//s:conditionalFormatting/s:cfRule/s:cfvo[@type='formula']", "val")]
+            targets += [(part, ".//s:hyperlinks/s:hyperlink", "location")]  # ブックの中へのリンク
+    targets += [(n, ".//c:f", None) for n in pkg.names if n.startswith("xl/charts/chart") and n.endswith(".xml")]
     fixed = 0
-    for part, xpath in targets:
+    for part, xpath, attr in targets:
         for el in pkg.xml(part).getroot().iterfind(xpath, NS):
-            if el.text and pattern.search(el.text):
-                el.text = fix(el.text)
+            value = el.get(attr) if attr else el.text
+            if value and pattern.search(value):
+                if attr:
+                    el.set(attr, fix(value))
+                else:
+                    el.text = fix(value)
+                pkg.touch(part)
+                fixed += 1
+    # 名前そのものを持つところ（ピボットテーブルの元データ・文書のプロパティのシート名の一覧）
+    exact = [(n, ".//s:cacheSource/s:worksheetSource", "sheet") for n in _parts(pkg, r"xl/pivotCache/pivotCacheDefinition[^/]*\.xml")]
+    if pkg.has("docProps/app.xml"):
+        exact.append(("docProps/app.xml", "ep:TitlesOfParts/vt:vector/vt:lpstr", None))
+    for part, xpath, attr in exact:
+        for el in pkg.xml(part).getroot().iterfind(xpath, NS):
+            value = el.get(attr) if attr else el.text
+            if value in renames:
+                if attr:
+                    el.set(attr, renames[value])
+                else:
+                    el.text = renames[value]
                 pkg.touch(part)
                 fixed += 1
     if fixed:
-        changes.append(Change(pkg.path.name, "sheet", "数式・名前の定義・グラフの参照", "", f"{fixed} か所を新しいシート名に更新", fixed))
+        changes.append(
+            Change(
+                pkg.path.name,
+                "sheet",
+                "数式・名前の定義・入力規則・条件付き書式・グラフの参照",
+                "",
+                f"{fixed} か所を新しいシート名に更新",
+                fixed,
+            )
+        )
     return changes, errors
 
 
@@ -222,6 +399,16 @@ def word(pkg: Package, text_rules: list[Rule]) -> list[Change]:
         )
         # 図形（DrawingML）の中の文字
         changes += _replace_paragraphs(pkg, part, _q("a", "p"), _q("a", "t"), text_rules, lambda p, n, lb=label: f"{lb} 図形")
+    for part in _parts(pkg, r"word/charts/chart[^/]*\.xml"):
+        label = posixpath.basename(part).removesuffix(".xml")
+        changes += _replace_paragraphs(pkg, part, _q("a", "p"), _q("a", "t"), text_rules, lambda p, n, lb=label: f"グラフ {lb}")
+    # コメントの作成者
+    if pkg.has("word/comments.xml"):
+        for c in pkg.xml("word/comments.xml").getroot().iterfind("w:comment", NS):
+            changes += _replace_value(pkg, "word/comments.xml", c, text_rules, "コメントの作成者", attr=_q("w", "author"))
+    if pkg.has("word/people.xml"):
+        for person in pkg.xml("word/people.xml").getroot().iterfind("w15:person", NS):
+            changes += _replace_value(pkg, "word/people.xml", person, text_rules, "コメントの作成者", attr=_q("w15", "author"))
     return changes
 
 
@@ -252,10 +439,31 @@ def powerpoint(pkg: Package, text_rules: list[Rule], include_masters: bool = Fal
                 changes += _replace_paragraphs(
                     pkg, target, _q("a", "p"), _q("a", "t"), text_rules, lambda p, n, no=no, lb=label: f"スライド {no} {lb}"
                 )
+    changes += _ppt_comments(pkg, text_rules)
     if include_masters:
         for part in sorted(n for n in pkg.names if re.fullmatch(r"ppt/(slideMasters/slideMaster|slideLayouts/slideLayout)\d+\.xml", n)):
             label = posixpath.basename(part).removesuffix(".xml")
             changes += _replace_paragraphs(
                 pkg, part, _q("a", "p"), _q("a", "t"), text_rules, lambda p, n, lb=label: f"{lb} 図形「{_shape_name(p)}」"
             )
+    return changes
+
+
+def _ppt_comments(pkg: Package, rules: list[Rule]) -> list[Change]:
+    """スライドのコメント（従来の形式と、新しい形式の返信を含む）とその作成者."""
+    changes: list[Change] = []
+    owner = _related(pkg, [(f"スライド {no}", s) for no, s in enumerate(_slide_order(pkg), start=1)], "comment")
+    for part in _parts(pkg, r"ppt/comments/[^/]*\.xml"):
+        label = (owner.get(part, "") + " コメント").strip()
+        if _root_is(pkg, part, "p", "cmLst"):
+            for text in pkg.xml(part).getroot().iterfind("p:cm/p:text", NS):
+                changes += _replace_value(pkg, part, text, rules, label)
+        elif _root_is(pkg, part, "p188", "cmLst"):
+            changes += _replace_paragraphs(pkg, part, _q("a", "p"), _q("a", "t"), rules, lambda p, n, lb=label: lb)
+    if pkg.has("ppt/commentAuthors.xml"):
+        for a in pkg.xml("ppt/commentAuthors.xml").getroot().iterfind("p:cmAuthor", NS):
+            changes += _replace_value(pkg, "ppt/commentAuthors.xml", a, rules, "コメントの作成者", attr="name")
+    if pkg.has("ppt/authors.xml"):
+        for a in pkg.xml("ppt/authors.xml").getroot().iterfind("p188:author", NS):
+            changes += _replace_value(pkg, "ppt/authors.xml", a, rules, "コメントの作成者", attr="name")
     return changes
