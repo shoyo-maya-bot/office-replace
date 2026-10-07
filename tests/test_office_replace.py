@@ -32,6 +32,11 @@ def samples(tmp_path: Path) -> Path:
     return tmp_path / "s"
 
 
+def report_of(out: Path) -> Path:
+    """既定のレポートの場所（出力フォルダと同じ階層の <出力>_report/）."""
+    return out.parent / f"{out.name}_report" / "office-replace-report.md"
+
+
 def run(*args: str) -> tuple[int, str]:
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -127,6 +132,9 @@ def test_replace_folder(samples: Path, tmp_path: Path):
     ]
     assert ws["B7"].value == 1200000  # 数値は変えない
     assert wb["集計"]["B1"].value == "='〇〇商事向け'!B9"
+    assert [c.name for c in wb["集計"].tables["窓口一覧"].tableColumns] == ["〇〇商事の窓口", "内線"]  # 見出しセルと一致
+    assert wb["集計"]["B3"].value == "=COUNTA(窓口一覧[〇〇商事の窓口])"
+    assert ws.oddHeader.center.text == "〇〇商事 御見積"
     with zipfile.ZipFile(out / "見積書_〇〇商事.xlsx") as z:
         drawing = z.read("xl/drawings/drawing1.xml").decode()
     assert "<a:t>〇〇商事</a:t>" in drawing and 'b="1"' in drawing  # 書式付きのランに入る
@@ -150,9 +158,9 @@ def test_replace_folder(samples: Path, tmp_path: Path):
     assert load_workbook(samples / "input/見積書_サンプル商事.xlsx").sheetnames[0] == "サンプル商事向け"
     assert not (out / "旧形式.xls").exists()
     # レポート
-    md = (out / "office-replace-report.md").read_text(encoding="utf-8")
+    md = report_of(out).read_text(encoding="utf-8")
     assert "シート名" in md and "古い形式" in md and "1 か所を新しいシート名に更新" in md
-    assert load_workbook(out / "office-replace-report.xlsx").sheetnames == ["ファイル", "置換箇所", "残り"]
+    assert load_workbook(report_of(out).with_suffix(".xlsx")).sheetnames == ["ファイル", "置換箇所", "残り"]
 
 
 def test_unchanged_parts_are_copied_byte_for_byte(samples: Path, tmp_path: Path):
@@ -187,7 +195,7 @@ def test_invalid_sheet_name_is_skipped_and_reported(samples: Path, tmp_path: Pat
         str(out),
     )
     assert rc == 1
-    assert "使えない文字" in (out / "office-replace-report.md").read_text(encoding="utf-8")
+    assert "使えない文字" in report_of(out).read_text(encoding="utf-8")
 
 
 def test_sheet_name_too_long(tmp_path: Path):
@@ -198,7 +206,7 @@ def test_sheet_name_too_long(tmp_path: Path):
     wb.save(src / "a.xlsx")
     rc, _ = run(str(src), "--from", "短い", "--to", "長" * 32, "--target", "sheet", "-o", str(tmp_path / "out"))
     assert rc == 1
-    assert "31 文字" in (tmp_path / "out/office-replace-report.md").read_text(encoding="utf-8")
+    assert "31 文字" in report_of(tmp_path / "out").read_text(encoding="utf-8")
 
 
 def test_file_name_collision(tmp_path: Path):
@@ -222,7 +230,7 @@ def test_broken_file_is_error(tmp_path: Path):
     (src / "pw.xlsx").write_bytes(b"not a zip")
     rc, _ = run(str(src), "--from", "a", "--to", "b", "-o", str(tmp_path / "out"))
     assert rc == 1
-    assert "開けません" in (tmp_path / "out/office-replace-report.md").read_text(encoding="utf-8")
+    assert "開けません" in report_of(tmp_path / "out").read_text(encoding="utf-8")
 
 
 def test_copy_all(samples: Path, tmp_path: Path):
@@ -377,7 +385,7 @@ def test_excel_properties_chart_phonetic_comments(tmp_path: Path):
     assert 'displayName="〇〇 太郎"' in _read(res, "xl/persons/person.xml")
     wb2 = load_workbook(res)
     assert wb2.active["A1"].comment.text.startswith("〇〇商会の担当")
-    md = (out / "office-replace-report.md").read_text(encoding="utf-8")
+    md = report_of(out).read_text(encoding="utf-8")
     assert "プロパティ" in md and "コメント" in md and "replace.leftover" not in md
 
 
@@ -451,7 +459,7 @@ def test_powerpoint_chart_cache_and_comments(tmp_path: Path):
     )
     out = tmp_path / "out"
     rc, msg = run(str(src), "--from", "架空", "--to", "〇〇", "-o", str(out))
-    assert rc == 0, msg
+    assert rc == 1, msg  # グラフの元データ（埋め込みのブック）に残る → 既定では終了コード 1
     res = out / "a.pptx"
     with zipfile.ZipFile(res) as z:
         chart_part = next(n for n in z.namelist() if n.startswith("ppt/charts/chart") and n.endswith(".xml"))
@@ -464,9 +472,9 @@ def test_powerpoint_chart_cache_and_comments(tmp_path: Path):
     assert 'name="〇〇 次郎"' in _read(res, "ppt/authors.xml")
     assert Presentation(res).core_properties.author == "〇〇 次郎"
     # グラフの元データ（埋め込みのブック）は置換しないので、残りとしてレポートに出る
-    md = (out / "office-replace-report.md").read_text(encoding="utf-8")
+    md = report_of(out).read_text(encoding="utf-8")
     assert "replace.leftover" in md and "embeddings/" in md
-    assert load_workbook(out / "office-replace-report.xlsx").sheetnames == ["ファイル", "置換箇所", "残り"]
+    assert load_workbook(report_of(out).with_suffix(".xlsx")).sheetnames == ["ファイル", "置換箇所", "残り"]
 
 
 def test_leftover_is_reported(tmp_path: Path):
@@ -479,12 +487,17 @@ def test_leftover_is_reported(tmp_path: Path):
     wb.save(src / "a.xlsx")
     out = tmp_path / "out"
     rc, msg = run(str(src), "--from", "架空商会", "--to", "〇〇", "-o", str(out))
-    assert rc == 0, msg  # 注意であり、エラーではない
-    md = (out / "office-replace-report.md").read_text(encoding="utf-8")
+    assert rc == 1, msg  # 残りがあれば既定で終了コード 1（破壊的変更）
+    assert "--allow-leftover" in msg
+    md = report_of(out).read_text(encoding="utf-8")
     assert "replace.leftover" in md and "xl/worksheets/sheet1.xml" in md and "架空商会" in md
+    assert "--target formula" in md  # 残った理由と対処を書く
+    # --allow-leftover で以前どおり 0
+    rc, msg = run(str(src), "--from", "架空商会", "--to", "〇〇", "-o", str(tmp_path / "out3"), "--allow-leftover")
+    assert rc == 0, msg
     # 置換後に置換前が含まれるルール（集計 → 集計_2027）は、残りと見なさない
     rc, _ = run(str(src), "--from", "架空", "--to", "架空X", "-o", str(tmp_path / "out2"))
-    assert "replace.leftover" not in (tmp_path / "out2/office-replace-report.md").read_text(encoding="utf-8")
+    assert "replace.leftover" not in report_of(tmp_path / "out2").read_text(encoding="utf-8")
     # 試行でも出る
     rc, dry = run(str(src), "--from", "架空商会", "--to", "〇〇", "--dry-run")
     assert "replace.leftover" in dry

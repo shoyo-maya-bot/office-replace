@@ -100,7 +100,7 @@ def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: O
     try:
         text_rules = _for(rules, "text")
         if suffix in EXCEL:
-            ch, errs = processors.excel(pkg, text_rules, _for(rules, "sheet"))
+            ch, errs = processors.excel(pkg, text_rules, _for(rules, "sheet"), _for(rules, "formula"))
             result.changes += ch
             result.messages += errs
         elif suffix in WORD:
