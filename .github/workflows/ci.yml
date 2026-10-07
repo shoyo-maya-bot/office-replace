@@ -33,13 +33,13 @@ jobs:
         run: |
           C=""; [ -f constraints.txt ] && C="-c constraints.txt"
           pip install $C -e ".[dev]"
-      - run: ruff check . && ruff format --check .
-      - run: pytest -q
+      - run: .github/scripts/run.sh bash -c "ruff check . && ruff format --check ."
+      - run: .github/scripts/run.sh pytest -q
       - name: sample run (dry-run and real)
         run: |
-          python samples/make_samples.py
-          office-replace samples/input --rules samples/rules.xlsx -r --dry-run
-          office-replace samples/input --rules samples/rules.csv -r -o "$RUNNER_TEMP/out"
+          .github/scripts/run.sh python samples/make_samples.py
+          .github/scripts/run.sh office-replace samples/input --rules samples/rules.xlsx -r --dry-run
+          .github/scripts/run.sh office-replace samples/input --rules samples/rules.csv -r -o "$RUNNER_TEMP/out"
           ls -R "$RUNNER_TEMP/out" "$RUNNER_TEMP/out_report"
 
   test-windows:
@@ -58,12 +58,12 @@ jobs:
         run: |
           C=""; [ -f constraints.txt ] && C="-c constraints.txt"
           pip install $C -e ".[dev]"
-      - run: pytest -q
+      - run: bash .github/scripts/run.sh pytest -q
       - name: sample run
         shell: bash
         run: |
-          python samples/make_samples.py
-          office-replace samples/input --rules samples/rules.csv -r -o "$RUNNER_TEMP/out"
+          bash .github/scripts/run.sh python samples/make_samples.py
+          bash .github/scripts/run.sh office-replace samples/input --rules samples/rules.csv -r -o "$RUNNER_TEMP/out"
 
   # 置換後のファイルが LibreOffice で開けるか（壊れた XML・食い違ったテーブル定義などを検出する）
   libreoffice:
@@ -88,8 +88,8 @@ jobs:
       - name: サンプルを置換して、headless で PDF に変換する
         run: |
           python samples/make_samples.py
-          office-replace samples/input --rules samples/rules.xlsx -r -o "$RUNNER_TEMP/out"
-          python .github/scripts/check_libreoffice.py "$RUNNER_TEMP/out" "$RUNNER_TEMP/lo"
+          .github/scripts/run.sh office-replace samples/input --rules samples/rules.xlsx -r -o "$RUNNER_TEMP/out"
+          .github/scripts/run.sh python .github/scripts/check_libreoffice.py "$RUNNER_TEMP/out" "$RUNNER_TEMP/lo"
 
   security:
     name: security (bandit・pip-audit)
@@ -108,6 +108,6 @@ jobs:
           pip install $C -e .
           pip install "bandit==1.8.6" "pip-audit==2.9.0"
       - name: SAST（bandit. 中以上）
-        run: bandit -q -r src -ll
+        run: .github/scripts/run.sh bandit -q -r src -ll
       - name: 依存の脆弱性（pip-audit）
-        run: pip-audit --skip-editable --progress-spinner off
+        run: .github/scripts/run.sh pip-audit --skip-editable --progress-spinner off

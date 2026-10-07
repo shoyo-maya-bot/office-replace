@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
@@ -164,5 +165,8 @@ def generate(out: Path) -> list[Path]:
 
 
 if __name__ == "__main__":
+    # Windows の CI など、標準出力が日本語を出せない文字コード（cp1252）でも落ちないように
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     for p in generate(HERE):
         print(p)
