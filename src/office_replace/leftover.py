@@ -2,6 +2,10 @@
 
 ツールが置換しない場所（数式の中の文字列・変更履歴・グラフの元データの埋め込みブックなど）に残った文字列を、
 注意（rule_id: replace.leftover）としてレポートに出す。残った理由（reason）も付ける。対象は「文字列」が対象の、正規表現でないルール。
+
+調べないもの（文字列ではない値で、置換前に当たっても固有名ではないもの）:
+- 文書のプロパティ（docProps/）の日付（作成日時・更新日時・印刷日時・ユーザー設定の日付）. 年度の置換（2025 → 2026）で毎回当たるため
+- Excel の共有文字列の番号（t="s" のセルの v. 文字ではなく番号）
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from dataclasses import dataclass
 
 from lxml import etree
 
-from .ooxml import _PARSER
+from .ooxml import _PARSER, UnsafeZipError, ZipLimits, check_zip
 from .rules import Rule
 
 RULE_ID = "replace.leftover"
@@ -21,6 +25,10 @@ XML_SUFFIXES = (".xml", ".rels", ".vml")
 OFFICE_SUFFIXES = (".xlsx", ".xlsm", ".docx", ".docm", ".pptx", ".pptm")
 MAX_EMBEDDED = 50 * 1024 * 1024  # 埋め込みのファイルはこの大きさまで調べる
 MAX_DEPTH = 2
+V_FORMULA = "v（数式の結果）"
+V_VALUE = "v（数値など）"
+# docProps の日付の要素（dcterms:created / modified、cp:lastPrinted、ユーザー設定の日付 vt:filetime / vt:date）
+DOCPROPS_DATES = {"created", "modified", "lastPrinted", "filetime", "date"}
 
 
 @dataclass
@@ -41,8 +49,14 @@ def reason(part: str, where: str) -> str:
         return "埋め込みファイル（グラフの元データのブックなど）の中。このツールは置換しません。元のアプリで開いて直してください"
     if part.startswith("xl/") and tag in ("f", "formula", "formula1", "formula2"):
         return "Excel の数式の中の文字列。対象に「数式」（--target formula）を指定すると置換できます"
-    if part.startswith("xl/worksheets/") and tag == "v":
-        return "Excel の数式の計算結果（保存されている値）。数式の中の文字列を置換すると消えます（--target formula）"
+    if part.startswith("xl/worksheets/") and tag == V_FORMULA:
+        return (
+            "Excel の数式の計算結果（ファイルに保存されている値）。このツールは計算結果を書き換えません。"
+            "数式の中の文字列が元なら --target formula で置換すると計算結果も消えます。"
+            "置換したセルを参照している数式なら、Excel で開いて再計算して保存すると直ります"
+        )
+    if part.startswith("xl/worksheets/") and tag == V_VALUE:
+        return "Excel の数値などのセルの値（文字列ではない値）。このツールは数値を置換しません。Excel で直してください"
     if part.startswith("xl/pivotCache/"):
         return "ピボットテーブルのキャッシュ。Excel で開いて「更新」すると元のデータに合わせて置き換わります"
     if part.startswith("xl/externalLinks/"):
@@ -65,8 +79,22 @@ def _local(tag) -> str:
     return tag.split("}", 1)[1] if isinstance(tag, str) and "}" in tag else str(tag)
 
 
-def _strings(data: bytes, tree: etree._ElementTree | None) -> list[tuple[str, str]]:
+def _v_name(el: etree._Element) -> str | None:
+    """Excel のセルの v の場所の名前. 共有文字列の番号（t="s"）は文字ではないので None（調べない）."""
+    c = el.getparent()
+    if c is None or _local(c.tag) != "c":
+        return "v"
+    if c.get("t") == "s":
+        return None
+    if any(_local(x.tag) == "f" for x in c if isinstance(x.tag, str)) or c.get("t") == "str":
+        return V_FORMULA
+    return V_VALUE
+
+
+def _strings(data: bytes, tree: etree._ElementTree | None, part: str = "") -> list[tuple[str, str]]:
     """部品の中の（場所, 文字列）. 文字・属性の値ごとに調べる."""
+    dates = DOCPROPS_DATES if part.startswith("docProps/") else set()
+    sheet = part.startswith("xl/worksheets/")
     if tree is None:
         try:
             tree = etree.ElementTree(etree.fromstring(data, _PARSER))
@@ -75,6 +103,12 @@ def _strings(data: bytes, tree: etree._ElementTree | None) -> list[tuple[str, st
     out: list[tuple[str, str]] = []
     for el in tree.getroot().iter():
         name = _local(el.tag) if isinstance(el.tag, str) else "comment"
+        if name in dates:
+            continue
+        if sheet and name == "v":
+            name = _v_name(el)
+            if name is None:
+                continue
         if el.text:
             out.append((name, el.text))
         if el.tail and el.tail.strip():
@@ -85,17 +119,26 @@ def _strings(data: bytes, tree: etree._ElementTree | None) -> list[tuple[str, st
 
 
 def scan_zip(
-    zf: zipfile.ZipFile, rules: list[Rule], trees: dict[str, etree._ElementTree] | None = None, prefix: str = "", depth: int = 0
+    zf: zipfile.ZipFile,
+    rules: list[Rule],
+    trees: dict[str, etree._ElementTree] | None = None,
+    prefix: str = "",
+    depth: int = 0,
+    limits: ZipLimits | None = None,
 ) -> list[Leftover]:
-    """zip のすべての XML 部品（と埋め込みの Office ファイル）を調べる. trees: 書き換え済みでまだ保存していない部品."""
+    """zip のすべての XML 部品（と埋め込みの Office ファイル）を調べる. trees: 書き換え済みでまだ保存していない部品.
+
+    埋め込みの Office ファイルも zip 爆弾の上限（limits）で確かめ、超えるものは調べずに飛ばす.
+    """
     trees = trees or {}
+    limits = limits or ZipLimits()
     found: list[Leftover] = []
     for info in zf.infolist():
         name = info.filename
         lower = name.lower()
         if lower.endswith(XML_SUFFIXES):
             tree = trees.get(name)
-            strings = _strings(b"" if tree is not None else zf.read(name), tree)
+            strings = _strings(b"" if tree is not None else zf.read(name), tree, name)
             for r in rules:
                 rx = r.compiled()
                 hits: dict[str, int] = {}
@@ -109,7 +152,8 @@ def scan_zip(
         elif lower.endswith(OFFICE_SUFFIXES) and depth < MAX_DEPTH and info.file_size <= MAX_EMBEDDED:
             try:
                 with zipfile.ZipFile(io.BytesIO(zf.read(name))) as inner:
-                    found += scan_zip(inner, rules, None, f"{prefix}{name}!", depth + 1)
-            except zipfile.BadZipFile:
+                    check_zip(inner, limits)
+                    found += scan_zip(inner, rules, None, f"{prefix}{name}!", depth + 1, limits)
+            except (zipfile.BadZipFile, UnsafeZipError):
                 continue
     return found

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import leftover, processors
-from .ooxml import Change, Package
-from .rules import Rule
+from .ooxml import Change, Package, UnsafeZipError, ZipLimits
+
+__all__ = ["FileResult", "Options", "ZipLimits", "process_file", "run"]
+from .rules import LONG_MATCH, Rule
+
+log = logging.getLogger(__name__)
 
 EXCEL = {".xlsx", ".xlsm"}
 WORD = {".docx", ".docm"}
@@ -26,6 +31,7 @@ class FileResult:
     changes: list[Change] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     leftovers: list[leftover.Leftover] = field(default_factory=list)  # 置換しきれずに残った置換前の文字列（注意）
+    warnings: list[str] = field(default_factory=list)  # 終了コードには影響しない注意（* の一致が長すぎる など）
 
 
 @dataclass
@@ -34,6 +40,7 @@ class Options:
     dry_run: bool = False
     copy_all: bool = False
     include_masters: bool = False
+    zip_limits: ZipLimits = field(default_factory=ZipLimits)  # zip 爆弾対策の上限（展開後の合計・部品の数・圧縮率）
 
 
 def _for(rules: list[Rule], target: str) -> list[Rule]:
@@ -92,10 +99,14 @@ def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: O
     if renamed:
         result.changes.append(Change(path.name, "file", "ファイル名", path.name, name, renamed))
     try:
-        pkg = Package(path)
+        pkg = Package(path, opt.zip_limits)
     except zipfile.BadZipFile:
         result.status = "error"
         result.messages.append("開けません（パスワード付き・壊れている・拡張子と中身が違う、のいずれか）")
+        return result
+    except UnsafeZipError as e:
+        result.status = "error"
+        result.messages.append(f"安全のため処理しません（{e}）")
         return result
     try:
         text_rules = _for(rules, "text")
@@ -127,11 +138,36 @@ def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: O
         if check:
             if not opt.dry_run and result.dest is not None and result.dest.exists():
                 with zipfile.ZipFile(result.dest) as zf:
-                    result.leftovers = leftover.scan_zip(zf, check)
+                    result.leftovers = leftover.scan_zip(zf, check, limits=opt.zip_limits)
             else:
-                result.leftovers = leftover.scan_zip(pkg.zip, check, {n: pkg.xml(n) for n in pkg.dirty})
+                result.leftovers = leftover.scan_zip(pkg.zip, check, {n: pkg.xml(n) for n in pkg.dirty}, limits=opt.zip_limits)
     finally:
         pkg.close()
+    return result
+
+
+def _long_match_warnings(rules: list[Rule], before: list[int]) -> list[str]:
+    """このファイルの処理中に増えた、* の長すぎる一致の警告. 置換前の文字列は入れない（レポートを伏せても漏れないように）."""
+    out = []
+    for i, (r, n) in enumerate(zip(rules, before, strict=True), start=1):
+        new = r.long_matches[n:]
+        if new:
+            out.append(
+                f"ルール {i} の * が {LONG_MATCH} 文字より長く一致しました（{len(new)} か所、最長 {max(new)} 文字）。"
+                "意図しない範囲まで置換していないか、置換後のファイルを確認してください"
+            )
+    return out
+
+
+def process_safely(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: Options) -> FileResult:
+    """1 ファイルを処理する. 想定外の例外でも全体を止めず、そのファイルをエラーとして記録する."""
+    marks = [len(r.long_matches) for r in rules]
+    try:
+        result = process_file(path, rel, out_dir, rules, opt)
+    except Exception as e:  # 1 ファイルの失敗で残りのファイルとレポートを失わないため
+        log.debug("処理に失敗: %s", path, exc_info=True)
+        result = FileResult(path, None, "error", messages=[f"処理中にエラーが起きました（{type(e).__name__}: {e}）"])
+    result.warnings += _long_match_warnings(rules, marks)
     return result
 
 
@@ -141,12 +177,16 @@ def run(src: Path, out_dir: Path, rules: list[Rule], opt: Options) -> list[FileR
     seen: dict[Path, Path] = {}
     for path in collect(src, opt.recursive):
         rel = path.relative_to(base)
-        dest = out_dir / rel.parent / new_name(path, rules)[0]
+        try:
+            dest = out_dir / rel.parent / new_name(path, rules)[0]
+        except Exception as e:  # 置換後の \\1 の誤りなど. このファイルだけエラーにして続ける
+            results.append(FileResult(path, None, "error", messages=[f"ファイル名を置換できません（{type(e).__name__}: {e}）"]))
+            continue
         key = Path(str(dest).lower())  # Windows は大文字小文字を区別しない
         if key in seen:
             msg = f"出力先が {seen[key].name} と同じ名前になるため処理しません（ファイル名の置換を見直してください）"
             results.append(FileResult(path, None, "error", messages=[msg]))
             continue
         seen[key] = path
-        results.append(process_file(path, rel, out_dir, rules, opt))
+        results.append(process_safely(path, rel, out_dir, rules, opt))
     return results
