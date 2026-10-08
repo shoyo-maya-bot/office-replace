@@ -6,6 +6,10 @@
 調べないもの（文字列ではない値で、置換前に当たっても固有名ではないもの）:
 - 文書のプロパティ（docProps/）の日付（作成日時・更新日時・印刷日時・ユーザー設定の日付）. 年度の置換（2025 → 2026）で毎回当たるため
 - Excel の共有文字列の番号（t="s" のセルの v. 文字ではなく番号）
+- 数値の構造の値を持つ要素の文字（図形のアンカーの行・列・オフセット、Word の図の位置、文書のプロパティの統計（ページ数・編集時間など）・版数）
+- XML の構造用の属性（色・大きさ・座標・ID・番号・書式など）. 調べる属性は、利用者が付けた名前や画面に出る文字を持つものだけ
+  （TEXT_ATTRS / ELEMENT_TEXT_ATTRS: シート名・名前の定義・テーブル名と列名・図形の名前と代替テキスト・作成者・
+  入力規則のメッセージ・ヒント・外部へのリンク先など）. `--from 50` が色（FF5050）や座標（off@x="5050"）に当たらないように
 
 Excel の数値のセル（数式の結果が数値のものも）の v は、値の全体が置換前に一致するときだけ数える（部分一致は数えない）.
 「202」の置換で 2025 が残りにならないように。文字列のセル・文字列の数式の結果（t="str"）は部分一致も数える.
@@ -36,6 +40,71 @@ SHEET_REF = "（シート名の参照）"  # 数式の中の、シートの参�
 FORMULA_TAGS = ("f", "formula", "formula1", "formula2", "definedName")
 # docProps の日付の要素（dcterms:created / modified、cp:lastPrinted、ユーザー設定の日付 vt:filetime / vt:date）
 DOCPROPS_DATES = {"created", "modified", "lastPrinted", "filetime", "date"}
+
+# 調べる属性（ローカル名）. 利用者が付けた名前・画面に出る文字を持つもの. ほかの属性（色・座標・ID・書式など）は調べない
+TEXT_ATTRS = {
+    "name",  # シート名・名前の定義・テーブル名・列名・図形の名前・ピボットの項目名など
+    "displayName",  # テーブル名
+    "descr",  # 図形・画像の代替テキスト
+    "title",  # 図形の代替テキストのタイトル・VML の題名
+    "alt",  # VML の代替テキスト
+    "tooltip",  # リンクのヒント
+    "display",  # Excel のリンクの表示文字
+    "location",  # Excel のリンク先（シート名!セル）
+    "author",  # 変更履歴・コメントの作成者
+    "initials",  # コメントの作成者の頭文字
+    "userId",  # 変更履歴の作成者の ID（メールアドレスなど）
+    "prompt",  # 入力規則のメッセージ
+    "promptTitle",
+    "error",
+    "errorTitle",
+    "totalsRowLabel",  # テーブルの集計行の文字
+    "sheet",  # ピボットテーブルの元データのシート名
+    "caption",  # ピボットの見出し
+    "text",  # 条件付き書式の「次の文字列を含む」
+    "string",  # VML の文字（textpath）
+}
+# 要素によって意味が変わる属性（val など）. 要素名と属性名の組で調べる
+ELEMENT_TEXT_ATTRS = {
+    ("alias", "val"),  # Word のコンテンツコントロールのタイトル
+    ("tag", "val"),  # Word のコンテンツコントロールのタグ
+    ("docVar", "val"),  # Word の文書変数
+    ("listEntry", "displayText"),  # Word のドロップダウンの選択肢
+    ("listEntry", "value"),
+    ("filter", "val"),  # Excel のオートフィルターの条件
+    ("customFilter", "val"),
+    ("sheetName", "val"),  # Excel の外部のブックのシート名
+    ("s", "v"),  # ピボットのキャッシュの文字列の項目
+    ("item", "n"),  # ピボットの項目の名前
+}
+
+# 文字（テキストノード）が数値の構造の値で、調べない要素（ローカル名）
+STRUCT_TEXT = {"col", "colOff", "row", "rowOff", "posOffset"}
+# docProps/ の統計など（ページ数・編集時間・版数など. 文字ではない値）
+DOCPROPS_STATS = {
+    "TotalTime",
+    "Pages",
+    "Words",
+    "Characters",
+    "CharactersWithSpaces",
+    "Lines",
+    "Paragraphs",
+    "Slides",
+    "Notes",
+    "HiddenSlides",
+    "MMClips",
+    "DocSecurity",
+    "AppVersion",
+    "revision",
+    "i4",  # 見出しの組（HeadingPairs）の数など
+}
+
+
+def _text_attr(element: str, attr: str, el: etree._Element) -> bool:
+    """属性を残りの確認で調べるか. 外部へのリンク（TargetMode="External"）のリンク先も調べる（ファイルのパス・URL）."""
+    if attr in TEXT_ATTRS or (element, attr) in ELEMENT_TEXT_ATTRS:
+        return True
+    return element == "Relationship" and attr == "Target" and el.get("TargetMode") == "External"
 
 
 @dataclass
@@ -166,7 +235,7 @@ def _split_sheet_refs(rx, part: str, where: str, text: str) -> list[tuple[str, i
 
 def _strings(data: bytes, tree: etree._ElementTree | None, part: str = "") -> list[tuple[str, str]]:
     """部品の中の（場所, 文字列）. 文字・属性の値ごとに調べる."""
-    dates = DOCPROPS_DATES if part.startswith("docProps/") else set()
+    skip = DOCPROPS_DATES | DOCPROPS_STATS if part.startswith("docProps/") else STRUCT_TEXT
     sheet = part.startswith("xl/worksheets/")
     if tree is None:
         try:
@@ -176,7 +245,7 @@ def _strings(data: bytes, tree: etree._ElementTree | None, part: str = "") -> li
     out: list[tuple[str, str]] = []
     for el in tree.getroot().iter():
         name = _local(el.tag) if isinstance(el.tag, str) else "comment"
-        if name in dates:
+        if name in skip:
             continue
         number = False
         if sheet and name == "v":
@@ -189,7 +258,9 @@ def _strings(data: bytes, tree: etree._ElementTree | None, part: str = "") -> li
         if el.tail and el.tail.strip():
             out.append((name, el.tail))
         for k, v in el.attrib.items():
-            out.append((f"{name}@{_local(k)}", v))
+            attr = _local(k)
+            if _text_attr(name, attr, el):
+                out.append((f"{name}@{attr}", v))
     return out
 
 
