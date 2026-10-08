@@ -172,3 +172,43 @@ def test_normal_office_files_are_within_default_limits(tmp_path: Path):
     wb.save(tmp_path / "big.xlsx")
     with zipfile.ZipFile(tmp_path / "big.xlsx") as z:
         check_zip(z, ZipLimits())
+
+
+def test_numeric_cell_partial_match_is_not_leftover(tmp_path: Path):
+    """数値のセルの部分一致（「202」の置換で 2025）は残りに数えない. 文字列のセルは部分一致も数える."""
+    src = tmp_path / "in"
+    src.mkdir()
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "202号室"
+    ws["A2"] = 2025  # 数値のセル（部分一致）
+    ws["A3"] = 3.14202  # 数値のセル（部分一致）
+    wb.save(src / "a.xlsx")
+    out = tmp_path / "out"
+    rc, msg = run(str(src), "--from", "202", "--to", "999", "-o", str(out))
+    assert rc == 0, msg
+    assert "replace.leftover" not in report_of(out).read_text(encoding="utf-8")
+    # 値の全体が一致する数値のセルは数える（本当に残っている）
+    ws["A4"] = 202
+    wb.save(src / "a.xlsx")
+    rc, _ = run(str(src), "--from", "202", "--to", "999", "-o", str(tmp_path / "out2"))
+    assert rc == 1
+    md = report_of(tmp_path / "out2").read_text(encoding="utf-8")
+    assert "v（数値など）" in md
+    # 文字列の数式の結果（t="str"）は部分一致も数える
+    _patch_zip(
+        src / "a.xlsx",
+        {
+            "xl/worksheets/sheet1.xml": lambda b: b.replace(
+                b"</sheetData>", b'<row r="9"><c r="A9" t="str"><f>"x"</f><v>A202B</v></c></row></sheetData>'
+            )
+        },
+    )
+    ws_strings = leftover._strings(_read_part(src / "a.xlsx", "xl/worksheets/sheet1.xml"), None, "xl/worksheets/sheet1.xml")
+    assert ("v（数式の結果）", "A202B") in ws_strings
+    assert not isinstance(dict((t, t) for _, t in ws_strings)["A202B"], leftover._Number)
+
+
+def _read_part(path: Path, part: str) -> bytes:
+    with zipfile.ZipFile(path) as z:
+        return z.read(part)
