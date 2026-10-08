@@ -144,11 +144,35 @@ class Package:
             raise
 
 
-def paragraphs(root: etree._Element, para_tag: str, text_tag: str) -> list[tuple[etree._Element, list[etree._Element]]]:
-    """段落ごとの文字要素. 段落の中に入れ子の段落（テキストボックス）があっても、いちばん近い段落に属させる."""
+# 段落の中の改行・タブの要素 → 段落の文字列での表し方. 置換は改行・タブをまたがない（textruns.replace_runs の fixed）
+BREAKS = {
+    f"{{{NS['w']}}}br": "\n",  # Word の改行（Shift+Enter. ページ・段の区切りも）
+    f"{{{NS['w']}}}cr": "\n",
+    f"{{{NS['w']}}}tab": "\t",  # Word のタブ（w:r の子. 段落の書式のタブ位置 w:tabs/w:tab は文字ではない）
+    f"{{{NS['a']}}}br": "\n",  # PowerPoint・図形の改行（DrawingML のタブは a:t の中の文字）
+}
+_RUN_TAGS = {f"{{{NS['w']}}}r", f"{{{NS['a']}}}p"}  # 改行・タブとして数える要素の親（w:br・w:tab は w:r、a:br は a:p の子）
+
+
+def is_break(el: etree._Element) -> bool:
+    return el.tag in BREAKS
+
+
+def paragraphs(
+    root: etree._Element, para_tag: str, text_tag: str, *, breaks: bool = False
+) -> list[tuple[etree._Element, list[etree._Element]]]:
+    """段落ごとの文字要素（文書の順）. 段落の中に入れ子の段落（テキストボックス）があっても、いちばん近い段落に属させる.
+
+    breaks: 改行・タブの要素（BREAKS）も並びに入れる. 文字列にするときは BREAKS の文字にし、置換で書き換えない.
+    """
+    tags = [text_tag] + ([t for t in BREAKS if t.split("}")[0] == text_tag.split("}")[0]] if breaks else [])
     groups: dict[etree._Element, list[etree._Element]] = {}
     order: list[etree._Element] = []
-    for t in root.iter(text_tag):
+    for t in root.iter(*tags):
+        if t.tag != text_tag:
+            parent = t.getparent()
+            if parent is None or parent.tag not in _RUN_TAGS:
+                continue
         p = next((a for a in t.iterancestors() if a.tag == para_tag), None)
         if p is None:
             continue
@@ -156,7 +180,8 @@ def paragraphs(root: etree._Element, para_tag: str, text_tag: str) -> list[tuple
             groups[p] = []
             order.append(p)
         groups[p].append(t)
-    return [(p, groups[p]) for p in order]
+    # 改行・タブしかない段落は置換するものがない
+    return [(p, groups[p]) for p in order if any(not is_break(t) for t in groups[p])]
 
 
 def set_text(t: etree._Element, value: str) -> None:

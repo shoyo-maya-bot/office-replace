@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from lxml import etree
 
-from ..ooxml import NS, Change, Package, paragraphs, set_text
+from ..ooxml import BREAKS, NS, Change, Package, is_break, paragraphs, set_text
 from ..rules import Rule
 from ..textruns import replace_all
 
@@ -29,12 +29,15 @@ def _replace_paragraphs(
 ) -> list[Change]:
     changes = []
     root = pkg.xml(part).getroot()
-    for n, (p, ts) in enumerate(paragraphs(root, para_tag, text_tag), start=1):
-        pieces = [t.text or "" for t in ts]
-        new, count = replace_all(pieces, rules)
+    for n, (p, ts) in enumerate(paragraphs(root, para_tag, text_tag, breaks=True), start=1):
+        # 改行・タブは "\n"・"\t" として段落の文字列に入れ、書き換えない（一致もまたがない）
+        fixed = {k for k, t in enumerate(ts) if is_break(t)}
+        pieces = [BREAKS[t.tag] if k in fixed else (t.text or "") for k, t in enumerate(ts)]
+        new, count = replace_all(pieces, rules, fixed)
         if count:
-            for t, v in zip(ts, new, strict=True):
-                set_text(t, v)
+            for k, (t, v) in enumerate(zip(ts, new, strict=True)):
+                if k not in fixed:
+                    set_text(t, v)
             pkg.touch(part)
             if not any(a.tag == MC_FALLBACK for a in p.iterancestors()):  # 互換用の複製は数えない
                 changes.append(Change(pkg.path.name, "text", where(p, n), _short("".join(pieces)), _short("".join(new)), count))
