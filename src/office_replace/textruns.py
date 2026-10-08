@@ -17,6 +17,8 @@ def replace_runs(pieces: list[str], rule: Rule) -> tuple[list[str], int]:
     matches = [m for m in rule.compiled().finditer(full) if m.end() > m.start()]
     if not matches:
         return texts, 0
+    for m in matches:
+        rule.note(m)
     for m in reversed(matches):  # 後ろから直すと、前のランの位置がずれない
         s, e = m.start(), m.end()
         rep = m.expand(rule.after) if rule.regex else rule.after

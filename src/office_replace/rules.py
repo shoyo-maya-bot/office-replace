@@ -1,7 +1,10 @@
 """置換のルール（置換前 → 置換後）. 置換前には * と ? のワイルドカードが使える.
 
 - `*` は 0 文字以上、`?` は 1 文字（Excel の検索と同じ）。`~*` `~?` `~~` で記号そのもの
-  - `*` は Excel と同じく **できるだけ長く** 一致する（`見積*` は「見積書A」の全体に一致する）。改行もまたぐ
+  - `*` は Excel と同じく **できるだけ長く** 一致する（`見積*` は「見積書A」の全体に一致する）
+  - ただし `*` は改行をまたがず、同じ置換前の 2 か所目の始まり（最初の `*` より前の部分）もまたがない.
+    「株式会社*支店」は「株式会社A支店と株式会社B支店」の 2 か所に別々に一致する（間の「と」は残る）
+  - 一致が長すぎる（LONG_MATCH 文字より長い）ときは、意図しない範囲かもしれないので警告を残す（long_matches）
 - `--regex` のときは置換前を正規表現として扱い、置換後で \\1 などのグループを使える
 - 対象（targets）: text（セル・図形・本文など）/ sheet（シート名）/ file（ファイル名）/ formula（Excel の数式の中の文字列）。既定は text
   - `all`（すべて）は text・sheet・file。formula は明示したときだけ（数式を書き換えるため）
@@ -33,18 +36,41 @@ _TARGET_ALIASES = {
 }
 
 
-def wildcard_to_regex(pattern: str) -> str:
+LONG_MATCH = 60  # * の一致がこの文字数を超えたら警告する
+
+
+def _tokens(pattern: str) -> list[str]:
+    """ワイルドカードの字句（"*" / "?" / 普通の 1 文字。~ の後の記号は普通の文字）."""
     out, i = [], 0
     while i < len(pattern):
         ch = pattern[i]
         if ch == "~" and i + 1 < len(pattern) and pattern[i + 1] in "*?~":
-            out.append(re.escape(pattern[i + 1]))
+            out.append("~" + pattern[i + 1])
             i += 2
             continue
-        # * は Excel と同じく最長一致（.*）. 改行もまたぐよう、compiled() で DOTALL を付ける
-        out.append(".*" if ch == "*" else "." if ch == "?" else re.escape(ch))
+        out.append(ch)
         i += 1
-    return "".join(out)
+    return out
+
+
+def _piece(tok: str) -> str:
+    if tok == "?":
+        return "."
+    return re.escape(tok[1:] if tok.startswith("~") else tok)
+
+
+def wildcard_to_regex(pattern: str) -> str:
+    """* と ? を正規表現にする. DOTALL は付けないので、. も * も改行をまたがない.
+
+    * は最長一致（Excel と同じ）だが、置換前の頭（最初の * より前）が次に現れる位置はまたがない.
+    これで 1 段落・1 セルに 2 か所あるとき、1 か所目から 2 か所目の終わりまでを 1 つにまとめて消すことがない.
+    """
+    toks = _tokens(pattern)
+    head_toks = toks[: toks.index("*")] if "*" in toks else []
+    # 頭が ? だけ（どの文字にも一致する）なら、止める目印にならないので普通の最長一致
+    head = "".join(_piece(t) for t in head_toks) if any(t != "?" for t in head_toks) else ""
+    star = f"(?:(?!{head}).)*" if head else ".*"
+    return "".join(star if t == "*" else _piece(t) for t in toks)
 
 
 @dataclass
@@ -56,21 +82,30 @@ class Rule:
     ignore_case: bool = False
     whole: bool = False  # セル・図形の文字列全体が一致するときだけ
     _re: re.Pattern[str] | None = field(default=None, repr=False)
+    long_matches: list[int] = field(default_factory=list, repr=False)  # LONG_MATCH を超えた一致の長さ（警告用）
 
     def compiled(self) -> re.Pattern[str]:
         if self._re is None:
             body = self.before if self.regex else wildcard_to_regex(self.before)
             if self.whole:
                 body = rf"\A(?:{body})\Z"
-            flags = (re.I if self.ignore_case else 0) | (0 if self.regex else re.S)
+            flags = re.I if self.ignore_case else 0  # DOTALL は付けない（段落・セル内の改行で止める）
             self._re = re.compile(body, flags)
         return self._re
 
+    def note(self, m: re.Match[str]) -> None:
+        """ワイルドカード * の一致が長すぎれば記録する（置換はする. 警告としてレポートに出す）."""
+        if not self.regex and "*" in _tokens(self.before) and m.end() - m.start() > LONG_MATCH:
+            self.long_matches.append(m.end() - m.start())
+
     def apply(self, text: str) -> tuple[str, int]:
         rx = self.compiled()
-        if self.regex:
-            return rx.subn(self.after, text)
-        return rx.subn(lambda _m: self.after, text)
+
+        def rep(m: re.Match[str]) -> str:
+            self.note(m)
+            return m.expand(self.after) if self.regex else self.after
+
+        return rx.subn(rep, text)
 
 
 def validate(rules: list[Rule]) -> list[str]:

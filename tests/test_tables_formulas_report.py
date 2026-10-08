@@ -11,7 +11,7 @@ from openpyxl.worksheet.table import Table
 from test_office_replace import _all_xml, _patch_zip, _read, report_of, run
 
 from office_replace.processors import rename_table_columns, replace_literals
-from office_replace.rules import Rule, load
+from office_replace.rules import LONG_MATCH, Rule, load
 
 # --- ワイルドカード（Excel と同じ最長一致） ------------------------------------------------------------
 
@@ -20,8 +20,88 @@ def test_wildcard_star_is_greedy_like_excel():
     # 採点で再現した入力: 見積* → 御見積 が「御見積書A」になっていた（最短一致）
     assert Rule("見積*", "御見積").apply("見積書A") == ("御見積", 1)
     assert Rule("株式会社*支店", "（支店名）").apply("株式会社テスト 新宿支店・渋谷支店") == ("（支店名）", 1)
-    assert Rule("A*", "X").apply("A1\nA2") == ("X", 1)  # 改行もまたぐ（Excel のセル内改行）
     assert Rule("担当: ?田", "X").apply("担当: 山田 担当: 田中") == ("X 担当: 田中", 1)
+
+
+@pytest.mark.parametrize(
+    ("before", "text", "expected"),
+    [
+        # 第 1 回の後退: 1 段落に 2 か所あると、1 か所目から 2 か所目の終わりまで 1 つにまとめて消えていた（間の「と」が消える）
+        ("株式会社*支店", "株式会社A支店と株式会社B支店", ("XとX", 2)),
+        ("株式会社*支店", "株式会社A支店と株式会社B支店です", ("XとXです", 2)),
+        ("担当?*様", "担当A山田様、担当B田中様", ("X、X", 2)),
+        # 頭（最初の * より前）が次に現れる手前で止め、2 か所目は別に当てる
+        ("見積*", "見積書A、見積書B", ("XX", 2)),
+        # 頭が無い（* から始まる）ときは止める目印が無いので、行の中では最長
+        ("*支店", "A支店とB支店", ("X", 1)),
+        ("abc*xyz", "ABC1xyz", ("ABC1xyz", 0)),  # -i なしは大文字小文字を区別
+    ],
+)
+def test_wildcard_star_does_not_swallow_second_occurrence(before: str, text: str, expected: tuple[str, int]):
+    assert Rule(before, "X").apply(text) == expected
+
+
+def test_wildcard_star_ignore_case_stops_at_second_occurrence():
+    assert Rule("abc*xyz", "X", ignore_case=True).apply("ABC1xyzとabc2XYZ") == ("XとX", 2)
+
+
+def test_wildcard_star_stops_at_newline():
+    # 段落・セル内の改行はまたがない（第 1 回は DOTALL で改行の先まで消していた）
+    assert Rule("A*", "X").apply("A1\nA2") == ("X\nX", 2)
+    assert Rule("株式会社*支店", "X").apply("株式会社A\n本社と支店") == ("株式会社A\n本社と支店", 0)
+    # 置換前そのものに改行があるとき（置換表のセル内改行）は、その改行には一致する
+    assert Rule("一行目\n二*", "X").apply("一行目\n二行目") == ("X", 1)
+
+
+def test_wildcard_long_match_is_warned():
+    r = Rule("株式会社*支店", "X")
+    assert r.apply("株式会社" + "あ" * 10 + "支店") == ("X", 1)
+    assert r.long_matches == []
+    assert r.apply("株式会社" + "あ" * (LONG_MATCH + 1) + "支店") == ("X", 1)  # 置換はする. 警告用に長さを残す
+    assert r.long_matches == [LONG_MATCH + 7]
+    plain = Rule("株式会社" + "あ" * (LONG_MATCH + 1), "X")  # * の無いルールは長くても警告しない
+    plain.apply(plain.before)
+    assert plain.long_matches == []
+
+
+def test_wildcard_two_occurrences_in_word_paragraph_and_excel_cell(tmp_path: Path):
+    from docx import Document
+
+    src = tmp_path / "in"
+    src.mkdir()
+    d = Document()
+    p = d.add_paragraph("株式会社A支店と")
+    p.add_run("株式会社B").bold = True  # 書式の切れ目をまたいでも同じ
+    p.add_run("支店にご案内")
+    d.add_paragraph("次の段落 株式会社C支店")
+    d.save(src / "a.docx")
+    wb = Workbook()
+    wb.active["A1"] = "株式会社A支店と株式会社B支店"
+    wb.active["A2"] = "株式会社C\n支店"  # セル内の改行はまたがない
+    wb.save(src / "b.xlsx")
+    out = tmp_path / "out"
+    rc, msg = run(str(src), "--from", "株式会社*支店", "--to", "（社名）", "-o", str(out), "--allow-leftover")
+    assert rc == 0, msg
+    texts = [p.text for p in Document(str(out / "a.docx")).paragraphs]
+    assert texts == ["（社名）と（社名）にご案内", "次の段落 （社名）"]
+    ws = load_workbook(out / "b.xlsx").active
+    assert ws["A1"].value == "（社名）と（社名）"
+    assert ws["A2"].value == "株式会社C\n支店"
+
+
+def test_wildcard_long_match_warning_in_report(tmp_path: Path):
+    src = tmp_path / "in"
+    src.mkdir()
+    wb = Workbook()
+    wb.active["A1"] = "株式会社" + "あ" * (LONG_MATCH + 5) + "支店"
+    wb.save(src / "a.xlsx")
+    out = tmp_path / "out"
+    rc, msg = run(str(src), "--from", "株式会社*支店", "--to", "X", "-o", str(out), "--mask-report")
+    assert rc == 0, msg  # 警告は終了コードに影響しない
+    assert "警告: 1 件" in msg
+    md = report_of(out).read_text(encoding="utf-8")
+    assert f"ルール 1 の * が {LONG_MATCH} 文字より長く一致" in md
+    assert "株式会社" not in md  # 警告に置換前の文字列は入れない（--mask-report でも漏れない）
 
 
 # --- 置換表の読み込み ---------------------------------------------------------------------------------
