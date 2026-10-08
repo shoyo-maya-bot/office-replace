@@ -50,6 +50,15 @@ _StringLoader.yaml_implicit_resolvers = {
 }
 
 
+def _load_yaml_strings(text: str):
+    """_StringLoader（SafeLoader の派生. 任意のオブジェクトは作らない）で YAML を読む."""
+    loader = _StringLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
 LONG_MATCH = 60  # * の一致がこの文字数を超えたら警告する
 
 
@@ -183,7 +192,7 @@ def load(path: Path, *, regex: bool = False, ignore_case: bool = False) -> list[
     rows: list[dict[str, str]]
     if suffix in (".yaml", ".yml"):
         # 値は書いたとおりの文字列で読む（0123 を 83、no を False にしない）
-        data = yaml.load(path.read_text(encoding="utf-8-sig"), Loader=_StringLoader) or {}  # SafeLoader の派生
+        data = _load_yaml_strings(path.read_text(encoding="utf-8-sig")) or {}
         rows = data.get("rules", data) if isinstance(data, dict) else data
     elif suffix in (".csv", ".tsv", ".txt"):
         text = None
