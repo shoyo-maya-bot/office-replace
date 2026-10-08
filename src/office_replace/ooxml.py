@@ -43,6 +43,10 @@ class UnsafeZipError(Exception):
     """展開すると大きすぎる・部品が多すぎる・圧縮率が高すぎる zip（zip 爆弾の疑い）."""
 
 
+class BrokenOutputError(Exception):
+    """置換すると壊れたファイル（Office が修復を求めるもの）になるため、このファイルは出力しない."""
+
+
 @dataclass(frozen=True)
 class ZipLimits:
     """zip 爆弾対策の上限. 既定値は普通の Office ファイルには十分な大きさ. CLI の --max-* で変えられる."""
