@@ -6,6 +6,9 @@
 調べないもの（文字列ではない値で、置換前に当たっても固有名ではないもの）:
 - 文書のプロパティ（docProps/）の日付（作成日時・更新日時・印刷日時・ユーザー設定の日付）. 年度の置換（2025 → 2026）で毎回当たるため
 - Excel の共有文字列の番号（t="s" のセルの v. 文字ではなく番号）
+
+Excel の数値のセル（数式の結果が数値のものも）の v は、値の全体が置換前に一致するときだけ数える（部分一致は数えない）.
+「202」の置換で 2025 が残りにならないように。文字列のセル・文字列の数式の結果（t="str"）は部分一致も数える.
 """
 
 from __future__ import annotations
@@ -79,6 +82,14 @@ def _local(tag) -> str:
     return tag.split("}", 1)[1] if isinstance(tag, str) and "}" in tag else str(tag)
 
 
+class _Number(str):
+    """Excel の数値のセルの値（文字列ではない値）. 残りの確認では値の全体の一致だけを数える."""
+
+
+# セルの型（c@t）のうち、値が文字列のもの. 無し・n（数値）・b（真偽）・e（エラー）・d（日付）は文字列ではない
+_TEXT_TYPES = {"str", "inlineStr"}
+
+
 def _v_name(el: etree._Element) -> str | None:
     """Excel のセルの v の場所の名前. 共有文字列の番号（t="s"）は文字ではないので None（調べない）."""
     c = el.getparent()
@@ -89,6 +100,13 @@ def _v_name(el: etree._Element) -> str | None:
     if any(_local(x.tag) == "f" for x in c if isinstance(x.tag, str)) or c.get("t") == "str":
         return V_FORMULA
     return V_VALUE
+
+
+def _count(rx, text: str) -> int:
+    """text の中の一致の数. 数値のセル（_Number）は値の全体が一致するときだけ 1（部分一致は数えない）."""
+    if isinstance(text, _Number):
+        return 1 if rx.fullmatch(text) else 0
+    return sum(1 for m in rx.finditer(text) if m.end() > m.start())
 
 
 def _strings(data: bytes, tree: etree._ElementTree | None, part: str = "") -> list[tuple[str, str]]:
@@ -105,12 +123,14 @@ def _strings(data: bytes, tree: etree._ElementTree | None, part: str = "") -> li
         name = _local(el.tag) if isinstance(el.tag, str) else "comment"
         if name in dates:
             continue
+        number = False
         if sheet and name == "v":
             name = _v_name(el)
             if name is None:
                 continue
+            number = el.getparent() is not None and el.getparent().get("t") not in _TEXT_TYPES
         if el.text:
-            out.append((name, el.text))
+            out.append((name, _Number(el.text) if number else el.text))
         if el.tail and el.tail.strip():
             out.append((name, el.tail))
         for k, v in el.attrib.items():
@@ -143,7 +163,7 @@ def scan_zip(
                 rx = r.compiled()
                 hits: dict[str, int] = {}
                 for where, text in strings:
-                    n = sum(1 for m in rx.finditer(text) if m.end() > m.start())
+                    n = _count(rx, text)
                     if n:
                         hits[where] = hits.get(where, 0) + n
                 if hits:
