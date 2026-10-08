@@ -144,7 +144,7 @@ ruff check . && ruff format --check . && pytest
 - 依存の版は `constraints.txt` でそろえます（`pip install -c constraints.txt -e ".[dev]"`。GitHub Actions の deps-lock が作る）
 - CI: Linux と Windows のテスト、LibreOffice で置換後のサンプルを開けるか（PDF に変換）、bandit・pip-audit
 
-構成: `rules.py`（置換表・ワイルドカード）→ `engine.py`（フォルダの走査・出力）→ `processors.py`（Excel / Word / PowerPoint）→
+構成: `rules.py`（置換表・ワイルドカード）→ `engine.py`（フォルダの走査・出力）→ `processors/`（形式ごと: `spreadsheet.py` Excel・`formula.py` 数式・`wordprocessing.py` Word・`presentation.py` PowerPoint・`docprops.py` 文書のプロパティ）→
 `textruns.py`（書式の切れ目をまたぐ置換）/ `ooxml.py`（zip と XML の読み書き）→ `leftover.py`（残りの確認）→ `report.py`
 
 ## セキュリティ・ライセンス
