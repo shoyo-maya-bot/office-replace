@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from lxml import etree
 
 from .ooxml import _PARSER, UnsafeZipError, ZipLimits, check_zip
+from .processors.formula import sheet_ref_spans
 from .rules import Rule
 
 RULE_ID = "replace.leftover"
@@ -30,6 +31,9 @@ MAX_EMBEDDED = 50 * 1024 * 1024  # 埋め込みのファイルはこの大きさ
 MAX_DEPTH = 2
 V_FORMULA = "v（数式の結果）"
 V_VALUE = "v（数値など）"
+SHEET_REF = "（シート名の参照）"  # 数式の中の、シートの参照（シート名!）に当たったもの. 場所の名前の後ろに付ける
+# 数式を持つ要素（セル・グラフの f、入力規則・条件付き書式の formula、名前の定義）
+FORMULA_TAGS = ("f", "formula", "formula1", "formula2", "definedName")
 # docProps の日付の要素（dcterms:created / modified、cp:lastPrinted、ユーザー設定の日付 vt:filetime / vt:date）
 DOCPROPS_DATES = {"created", "modified", "lastPrinted", "filetime", "date"}
 
@@ -50,7 +54,16 @@ def reason(part: str, where: str) -> str:
     tag = el.split("@", 1)[0]
     if "!" in part:
         return "埋め込みファイル（グラフの元データのブックなど）の中。このツールは置換しません。元のアプリで開いて直してください"
-    if part.startswith("xl/") and tag in ("f", "formula", "formula1", "formula2"):
+    if part.startswith("xl/") and tag.endswith(SHEET_REF):
+        return (
+            "Excel の数式・名前の定義の中のシート名の参照（シート名!）。シート名に置換前が入っているためです。"
+            "対象に「シート名」（--target sheet）を指定すると、シート名と参照をあわせて置換できます"
+        )
+    if part == "xl/workbook.xml" and el == "sheet@name":
+        return "Excel のシート名。対象に「シート名」（--target sheet）を指定すると置換できます（数式の参照もあわせて直します）"
+    if part == "docProps/app.xml" and tag == "lpstr":
+        return "文書のプロパティのシート名の一覧。対象に「シート名」（--target sheet）を指定するとシート名とあわせて置換できます"
+    if part.startswith("xl/") and tag in FORMULA_TAGS:
         return "Excel の数式の中の文字列。対象に「数式」（--target formula）を指定すると置換できます"
     if part.startswith("xl/worksheets/") and tag == V_FORMULA:
         return (
@@ -109,6 +122,22 @@ def _count(rx, text: str) -> int:
     return sum(1 for m in rx.finditer(text) if m.end() > m.start())
 
 
+def _split_sheet_refs(rx, part: str, where: str, text: str) -> list[tuple[str, int]]:
+    """一致の数を、数式の中のシート名の参照に当たったもの（where + SHEET_REF）とそれ以外に分ける."""
+    if not (part.startswith("xl/") and where in FORMULA_TAGS) or "!" not in text:
+        return [(where, _count(rx, text))]
+    spans = sheet_ref_spans(text)
+    in_ref = other = 0
+    for m in rx.finditer(text):
+        if m.end() <= m.start():
+            continue
+        if any(a <= m.start() and m.end() <= b for a, b in spans):
+            in_ref += 1
+        else:
+            other += 1
+    return [(where + SHEET_REF, in_ref), (where, other)]
+
+
 def _strings(data: bytes, tree: etree._ElementTree | None, part: str = "") -> list[tuple[str, str]]:
     """部品の中の（場所, 文字列）. 文字・属性の値ごとに調べる."""
     dates = DOCPROPS_DATES if part.startswith("docProps/") else set()
@@ -163,9 +192,9 @@ def scan_zip(
                 rx = r.compiled()
                 hits: dict[str, int] = {}
                 for where, text in strings:
-                    n = _count(rx, text)
-                    if n:
-                        hits[where] = hits.get(where, 0) + n
+                    for w, n in _split_sheet_refs(rx, name, where, text):
+                        if n:
+                            hits[w] = hits.get(w, 0) + n
                 if hits:
                     where = "、".join(list(hits)[:3])
                     found.append(Leftover(RULE_ID, prefix + name, where, r.before, sum(hits.values()), reason(prefix + name, where)))
