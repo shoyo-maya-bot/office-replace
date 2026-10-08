@@ -11,6 +11,7 @@
 
 ### 変えたこと（第 3 回）
 
+- devtools-common を cbe97d5 に上げた（全ツールでそろえる固定先）
 - `processors.py` を形式ごとのモジュール（`processors/` の spreadsheet・formula・wordprocessing・presentation・docprops・common）に分けた。振る舞いは同じ
 
 ### 直したこと（0.2.0 の後退）
