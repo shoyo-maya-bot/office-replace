@@ -48,10 +48,36 @@ class Leftover:
     reason: str = ""  # 残った理由と対処
 
 
+FILE_NAME_PART = "（出力ファイル名）"
+FILE_NAME_WHERE = "ファイル名・フォルダ名"
+
+
+def name_rules(rules: list[Rule]) -> list[Rule]:
+    """名前を調べるルール. 対象に「文字列」か「ファイル名」を含む、正規表現でないもの（置換後に置換前が含まれるものは除く）."""
+    return [r for r in rules if not r.regex and {"text", "file"} & set(r.targets) and not r.compiled().search(r.after)]
+
+
+def scan_name(rel_dest: str, rules: list[Rule]) -> list[Leftover]:
+    """出力ファイルの名前（出力フォルダからの相対パス）に残った置換前の文字列. rules は name_rules で選んだもの."""
+    out = []
+    for r in rules:
+        n = _count(r.compiled(), rel_dest)
+        if n:
+            out.append(
+                Leftover(RULE_ID, f"{FILE_NAME_PART} {rel_dest}", FILE_NAME_WHERE, r.before, n, reason(FILE_NAME_PART, FILE_NAME_WHERE))
+            )
+    return out
+
+
 # 残った理由（部品・要素名から判断する）. 上から順に当てはめる
 def reason(part: str, where: str) -> str:
     el = where.split("、", 1)[0]
     tag = el.split("@", 1)[0]
+    if part.startswith(FILE_NAME_PART):
+        return (
+            "出力ファイルの名前（またはフォルダ名）。ファイル名は対象に「ファイル名」（--target file）を指定すると置換できます。"
+            "フォルダ名は置換しないので、出力フォルダで名前を変えてください"
+        )
     if "!" in part:
         return "埋め込みファイル（グラフの元データのブックなど）の中。このツールは置換しません。元のアプリで開いて直してください"
     if part.startswith("xl/") and tag.endswith(SHEET_REF):

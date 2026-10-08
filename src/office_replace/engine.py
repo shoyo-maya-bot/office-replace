@@ -94,7 +94,9 @@ def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: O
         if opt.copy_all and not opt.dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, dest)
-        return FileResult(path, dest if opt.copy_all else None, "skipped", messages=["Office のファイルではありません"])
+        skipped = FileResult(path, dest if opt.copy_all else None, "skipped", messages=["Office のファイルではありません"])
+        skipped.leftovers += _name_leftovers(skipped, out_dir, rules)
+        return skipped
     result = FileResult(path, dest, "unchanged")
     if renamed:
         result.changes.append(Change(path.name, "file", "ファイル名", path.name, name, renamed))
@@ -143,7 +145,18 @@ def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: O
                 result.leftovers = leftover.scan_zip(pkg.zip, check, {n: pkg.xml(n) for n in pkg.dirty}, limits=opt.zip_limits)
     finally:
         pkg.close()
+    result.leftovers += _name_leftovers(result, out_dir, rules)
     return result
+
+
+def _name_leftovers(result: FileResult, out_dir: Path, rules: list[Rule]) -> list[leftover.Leftover]:
+    """書き出す（試行なら書き出すはずの）ファイルの名前に置換前の文字列が残っていないか."""
+    if result.dest is None:
+        return []
+    check = leftover.name_rules(rules)
+    if not check:
+        return []
+    return leftover.scan_name(result.dest.relative_to(out_dir).as_posix(), check)
 
 
 def _long_match_warnings(rules: list[Rule], before: list[int]) -> list[str]:
