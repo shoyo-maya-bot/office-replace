@@ -39,6 +39,39 @@ NS = {
 _PARSER = etree.XMLParser(remove_blank_text=False, huge_tree=True, resolve_entities=False, no_network=True)
 
 
+class UnsafeZipError(Exception):
+    """展開すると大きすぎる・部品が多すぎる・圧縮率が高すぎる zip（zip 爆弾の疑い）."""
+
+
+@dataclass(frozen=True)
+class ZipLimits:
+    """zip 爆弾対策の上限. 既定値は普通の Office ファイルには十分な大きさ. CLI の --max-* で変えられる."""
+
+    max_total: int = 2 * 1024**3  # 展開後の合計（バイト）
+    max_entries: int = 10_000  # 部品の数
+    max_ratio: float = 200.0  # 部品ごとの圧縮率（展開後 / 圧縮後）
+    ratio_min_size: int = 1024 * 1024  # 圧縮率はこの大きさ（展開後）を超える部品だけ見る（小さい XML は圧縮率が高くて普通）
+
+
+def check_zip(zf: zipfile.ZipFile, limits: ZipLimits) -> None:
+    """中身を読む前に、zip の目録（申告されたサイズ）で上限を確かめる. 超えれば UnsafeZipError.
+
+    zipfile は目録のサイズより多くは展開しない（超える分は読まず、CRC が合わなければ BadZipFile）ので、目録で確かめれば足りる.
+    """
+    infos = zf.infolist()
+    if len(infos) > limits.max_entries:
+        raise UnsafeZipError(f"部品の数が {len(infos)} 個で、上限 {limits.max_entries} 個を超えています")
+    total = 0
+    for info in infos:
+        total += info.file_size
+        if total > limits.max_total:
+            raise UnsafeZipError(f"展開後の大きさが上限 {limits.max_total:,} バイトを超えます")
+        if info.file_size > limits.ratio_min_size:
+            ratio = info.file_size / max(info.compress_size, 1)
+            if ratio > limits.max_ratio:
+                raise UnsafeZipError(f"部品 {info.filename} の圧縮率が {ratio:.0f} 倍で、上限 {limits.max_ratio:g} 倍を超えています")
+
+
 @dataclass
 class Change:
     file: str
@@ -50,9 +83,15 @@ class Change:
 
 
 class Package:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, limits: ZipLimits | None = None):
         self.path = path
+        self.limits = limits or ZipLimits()
         self.zip = zipfile.ZipFile(path)
+        try:
+            check_zip(self.zip, self.limits)
+        except UnsafeZipError:
+            self.zip.close()
+            raise
         self.names = self.zip.namelist()
         self._xml: dict[str, etree._ElementTree] = {}
         self.dirty: set[str] = set()
@@ -65,8 +104,11 @@ class Package:
 
     def xml(self, name: str) -> etree._ElementTree:
         if name not in self._xml:
-            self._xml[name] = etree.ElementTree(etree.fromstring(self.zip.read(name), _PARSER))
+            self._xml[name] = etree.ElementTree(etree.fromstring(self.read(name), _PARSER))
         return self._xml[name]
+
+    def read(self, name: str) -> bytes:
+        return self.zip.read(name)
 
     def touch(self, name: str) -> None:
         self.dirty.add(name)
@@ -94,7 +136,7 @@ class Package:
                     if info.filename in self.dirty:
                         data = etree.tostring(self._xml[info.filename], xml_declaration=True, encoding="UTF-8", standalone=True)
                     else:
-                        data = self.zip.read(info.filename)
+                        data = self.read(info.filename)
                     out.writestr(info, data, compress_type=info.compress_type)
             tmp.replace(dest)
         except BaseException:

@@ -46,6 +46,7 @@ def summary(results: list[FileResult]) -> dict[str, int]:
         out[r.status] += 1
     out["置換件数"] = sum(c.count for r in results for c in r.changes)
     out["残り"] = sum(x.count for r in results for x in r.leftovers)
+    out["警告"] = sum(len(r.warnings) for r in results)
     return out
 
 
@@ -69,6 +70,7 @@ def markdown(results: list[FileResult], *, dry_run: bool, src: Path, out: Path, 
         "",
     ]
     errs = [(r, msg) for r in results for msg in r.messages if r.status in ("error", "changed")]
+    errs += [(r, "警告: " + w) for r in results for w in r.warnings]
     if errs:
         lines += ["## エラー・注意", "", "| ファイル | 内容 |", "|---|---|"]
         lines += [f"| {_cell(m(r.source.name))} | {_cell(m(msg))} |" for r, msg in errs]
@@ -128,7 +130,13 @@ def excel(results: list[FileResult], path: Path, mask: Callable[[str], str] | No
         ws,
         ["ファイル", "出力先", "結果", "置換件数", "メッセージ"],
         [
-            [m(str(r.source)), m(str(r.dest or "")), STATUS[r.status], sum(c.count for c in r.changes), m(" / ".join(r.messages))]
+            [
+                m(str(r.source)),
+                m(str(r.dest or "")),
+                STATUS[r.status],
+                sum(c.count for c in r.changes),
+                m(" / ".join(r.messages + ["警告: " + w for w in r.warnings])),
+            ]
             for r in results
         ],
         [50, 50, 10, 10, 60],

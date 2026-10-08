@@ -9,6 +9,8 @@
   （出力フォルダを共有しても置換前の文字列が漏れないよう、出力フォルダの外に置く。--report で場所を指定、--mask-report で伏せる）
 終了コード: 0 正常 / 1 エラーのあったファイルあり、または置換前の文字列が残っている（--allow-leftover で 0）
            / 2 引数・置換表の誤り / 3 実行時エラー
+  1 ファイルの処理に失敗しても残りのファイルは続けて処理し、レポートは必ず書く（失敗したファイルはエラー、終了コード 1）。
+  zip 爆弾対策: 展開後の合計・部品の数・圧縮率が上限（--max-unzip-mb / --max-entries / --max-ratio）を超えるファイルはエラーにする
 """
 
 from __future__ import annotations
@@ -55,8 +57,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--allow-leftover", action="store_true", help="置換前の文字列が残っていても終了コードを 0 にする（以前の動き。レポートには出す）"
     )
+    lim = engine.ZipLimits()
+    p.add_argument(
+        "--max-unzip-mb",
+        type=_positive(int),
+        default=lim.max_total // 1024**2,
+        help=f"zip 爆弾対策: 1 ファイルを展開した後の合計の上限（MB）。既定 {lim.max_total // 1024**2}",
+    )
+    p.add_argument(
+        "--max-entries",
+        type=_positive(int),
+        default=lim.max_entries,
+        help=f"zip 爆弾対策: 1 ファイルの部品の数の上限。既定 {lim.max_entries}",
+    )
+    p.add_argument(
+        "--max-ratio",
+        type=_positive(float),
+        default=lim.max_ratio,
+        help=f"zip 爆弾対策: 部品の圧縮率（展開後 / 圧縮後）の上限。既定 {lim.max_ratio:g}",
+    )
     p.add_argument("--log-level", default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p
+
+
+def _positive(kind):
+    def conv(value: str):
+        try:
+            v = kind(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"数で指定してください: {value}") from None
+        if v <= 0:
+            raise argparse.ArgumentTypeError(f"0 より大きい数で指定してください: {value}")
+        return v
+
+    return conv
 
 
 def _rules(args) -> list[Rule]:
@@ -98,7 +132,18 @@ def main(argv: list[str] | None = None) -> int:
             "出力フォルダを共有するときは消すか --mask-report を付けてください",
             file=sys.stderr,
         )
-    results = engine.run(args.input, out_dir, rules, engine.Options(args.recursive, args.dry_run, args.copy_all, args.include_masters))
+    results = engine.run(
+        args.input,
+        out_dir,
+        rules,
+        engine.Options(
+            args.recursive,
+            args.dry_run,
+            args.copy_all,
+            args.include_masters,
+            engine.ZipLimits(max_total=args.max_unzip_mb * 1024**2, max_entries=args.max_entries, max_ratio=args.max_ratio),
+        ),
+    )
     mask = report.masker(rules) if args.mask_report else None
     md = report.markdown(results, dry_run=args.dry_run, src=args.input, out=out_dir, mask=mask)
     if report_md:
@@ -110,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     if s["残り"]:
         left_note = f"\n注意: 置換前の文字列が {s['残り']} 件残っています（レポートの「残っている文字列」の理由と対処を確認してください）"
         left_note += "" if args.allow_leftover else "。終了コードは 1 です（--allow-leftover で 0）"
+    if s["警告"]:
+        left_note += f"\n警告: {s['警告']} 件（* の一致が長すぎるなど。レポートの「エラー・注意」を確認してください）"
     print(
         md
         if args.dry_run
