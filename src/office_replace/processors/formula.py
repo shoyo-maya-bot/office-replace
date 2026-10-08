@@ -10,11 +10,65 @@ from ..ooxml import NS, Change, Package
 from ..rules import Rule
 from .common import _apply_simple, _q, _root_is, _short
 
+_UNQUOTED_REF = re.compile(r"(\[[^\]'!]*\])?([\w.]+)(?::([\w.]+))?!")
 
-def _ref(name: str) -> str:
-    if re.fullmatch(r"[A-Za-z_぀-ヿ㐀-鿿][\w.぀-ヿ㐀-鿿]*", name) and not re.fullmatch(r"[A-Za-z]{1,3}\d+", name):
-        return name
-    return "'" + name.replace("'", "''") + "'"
+
+def _quote_sheets(names: list[str]) -> str:
+    return "'" + ":".join(names).replace("'", "''") + "'!"
+
+
+def rename_sheet_refs(formula: str, renames: dict[str, str]) -> tuple[str, int]:
+    """数式のシートの参照（シート名!）を新しいシート名にする → (新しい数式, 書き換えた数).
+
+    - 'シート名'! と シート名! の両方. 書き換えた参照は引用符で囲む（'新名'!）
+    - 3D 参照（集計:別!A1 / '集計:別'!A1）は、両端のシート名をそれぞれ直し、全体を 1 つの引用符で囲む（'集計:新名'!A1）
+    - 外部のブックの参照（[1]集計!A1 / '[1]集計'!A1）は書き換えない（別のブックのシートなので）
+    - 文字列（"..."）の中は書き換えない
+    """
+    out: list[str] = []
+    n = 0
+    i = 0
+    while i < len(formula):
+        ch = formula[i]
+        # 名前の途中（直前が文字・数字・_ . ' ]）からは参照を始めない
+        boundary = i == 0 or not (formula[i - 1].isalnum() or formula[i - 1] in "_.']")
+        if ch == '"':  # 文字列（"..."）の中は変えない（Excel もシート名の変更で INDIRECT の文字列は変えない）
+            j = _skip_quoted(formula, i, '"')
+            out.append(formula[i:j])
+            i = j
+            continue
+        if ch == "'" and boundary:
+            j = _skip_quoted(formula, i, "'")
+            if formula[j : j + 1] == "!" and formula[j - 1 : j] == "'":
+                body = formula[i + 1 : j - 1].replace("''", "'")
+                if not body.startswith("["):  # 外部のブック
+                    names = body.split(":")  # シート名には : を使えない
+                    new = [renames.get(x, x) for x in names]
+                    if new != names:
+                        out.append(_quote_sheets(new))
+                        n += 1
+                        i = j + 1
+                        continue
+                out.append(formula[i : j + 1])
+                i = j + 1
+                continue
+        elif boundary:
+            m = _UNQUOTED_REF.match(formula, i)
+            if m:
+                if not m.group(1):  # [1]シート名! は外部のブック
+                    names = [x for x in (m.group(2), m.group(3)) if x is not None]
+                    new = [renames.get(x, x) for x in names]
+                    if new != names:
+                        out.append(_quote_sheets(new))
+                        n += 1
+                        i = m.end()
+                        continue
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out), n
 
 
 # 数式を持つ場所. 入力規則（dataValidation の formula1/2）・条件付き書式（cfRule の formula）は、

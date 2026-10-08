@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 from lxml import etree
 
 from ..ooxml import NS, Change, Package, set_text
@@ -11,7 +9,7 @@ from ..rules import Rule
 from ..sheetname import check_sheet_name
 from ..textruns import replace_all
 from .common import _apply_simple, _parts, _q, _related, _replace_paragraphs, _replace_value, _root_is, _shape_name, _short
-from .formula import _formula_elements, _formula_literals, _ref, _table_parts, rename_table_columns
+from .formula import _formula_elements, _formula_literals, _table_parts, rename_sheet_refs, rename_table_columns
 
 
 def _drop_phonetic(container: etree._Element) -> None:
@@ -259,26 +257,18 @@ def _rename_sheets(pkg: Package, sheets, rules: list[Rule]) -> tuple[list[Change
         changes.append(Change(pkg.path.name, "sheet", "シート名", old, new, 1))
     if not renames:
         return changes, errors
-    # 数式・名前の定義・グラフの参照を新しいシート名に合わせる（'旧名'! と 旧名! の両方。新しい名前は引用符で囲む）
-    mapping: dict[str, str] = {}
-    for o, n in renames.items():
-        new_ref = "'" + n.replace("'", "''") + "'!"
-        mapping["'" + o.replace("'", "''") + "'!"] = new_ref
-        if _ref(o) == o:
-            mapping[o + "!"] = new_ref
-    pattern = re.compile(r"(?<![\w'.])(?:" + "|".join(re.escape(k) for k in sorted(mapping, key=len, reverse=True)) + ")")
-
-    def fix(text: str) -> str:
-        return pattern.sub(lambda m: mapping[m.group(0)], text)
-
+    # 数式・名前の定義・グラフの参照を新しいシート名に合わせる（'旧名'! と 旧名!、3D 参照の両端. 外部のブックの参照は変えない）
     fixed = 0
     for part, el, attr in _formula_elements(pkg, sheets):
         value = el.get(attr) if attr else el.text
-        if value and pattern.search(value):
+        if not value or "!" not in value:
+            continue
+        new_value, n = rename_sheet_refs(value, renames)
+        if n:
             if attr:
-                el.set(attr, fix(value))
+                el.set(attr, new_value)
             else:
-                el.text = fix(value)
+                el.text = new_value
             pkg.touch(part)
             fixed += 1
     # 名前そのものを持つところ（ピボットテーブルの元データ・文書のプロパティのシート名の一覧）

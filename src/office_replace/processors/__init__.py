@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from .common import MC_FALLBACK, Q
 from .docprops import APP_FIELDS, CORE_FIELDS, chart_caches, properties
-from .formula import SHEET_FORMULA_XPATHS, rename_table_columns, replace_literals
+from .formula import SHEET_FORMULA_XPATHS, rename_sheet_refs, rename_table_columns, replace_literals
 from .presentation import powerpoint
 from .spreadsheet import excel
 from .wordprocessing import WORD_PARTS, word
@@ -30,6 +30,7 @@ __all__ = [
     "excel",
     "powerpoint",
     "properties",
+    "rename_sheet_refs",
     "rename_table_columns",
     "replace_literals",
     "word",
