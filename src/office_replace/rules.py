@@ -36,6 +36,20 @@ _TARGET_ALIASES = {
 }
 
 
+class _StringLoader(yaml.SafeLoader):
+    """YAML の値を書いたとおりの文字列で読むローダー.
+
+    safe_load は `0123` を 83（8 進数）、`no` を False、`1.0` を 1.0、`2026-01-01` を日付にするため、
+    置換前・置換後が書いた文字と変わる. ここでは null（空・`~`・`null`）以外の暗黙の型の判定を外し、すべて文字列で読む.
+    """
+
+
+_StringLoader.yaml_implicit_resolvers = {
+    ch: [(tag, rx) for tag, rx in resolvers if tag in ("tag:yaml.org,2002:null", "tag:yaml.org,2002:merge")]
+    for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
 LONG_MATCH = 60  # * の一致がこの文字数を超えたら警告する
 
 
@@ -144,7 +158,10 @@ def _row_rule(row: dict[str, str], *, regex: bool, ignore_case: bool) -> Rule | 
     def get(*names: str) -> str:
         for n in names:
             if n in row and row[n] is not None:
-                return str(row[n])
+                v = row[n]
+                if isinstance(v, list):  # YAML の 対象: [text, sheet]
+                    return ",".join(str(x) for x in v)
+                return str(v)
         return ""
 
     before = get("置換前", "before", "from", "検索")
@@ -165,7 +182,8 @@ def load(path: Path, *, regex: bool = False, ignore_case: bool = False) -> list[
     suffix = path.suffix.lower()
     rows: list[dict[str, str]]
     if suffix in (".yaml", ".yml"):
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        # 値は書いたとおりの文字列で読む（0123 を 83、no を False にしない）
+        data = yaml.load(path.read_text(encoding="utf-8-sig"), Loader=_StringLoader) or {}  # SafeLoader の派生
         rows = data.get("rules", data) if isinstance(data, dict) else data
     elif suffix in (".csv", ".tsv", ".txt"):
         text = None
