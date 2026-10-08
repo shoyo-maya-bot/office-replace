@@ -71,6 +71,37 @@ def rename_sheet_refs(formula: str, renames: dict[str, str]) -> tuple[str, int]:
     return "".join(out), n
 
 
+def sheet_ref_spans(formula: str) -> list[tuple[int, int]]:
+    """数式の中のシートの参照（'シート名'! / シート名! / 3D 参照）の範囲 (始め, 終わり) の一覧. 外部のブックの参照・文字列の中は除く.
+
+    rename_sheet_refs と同じ読み方. 残りの確認で、置換前がシート名のせいで数式に残っているかを見分けるのに使う.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(formula):
+        ch = formula[i]
+        boundary = i == 0 or not (formula[i - 1].isalnum() or formula[i - 1] in "_.']")
+        if ch == '"':
+            i = _skip_quoted(formula, i, '"')
+            continue
+        if ch == "'" and boundary:
+            j = _skip_quoted(formula, i, "'")
+            if formula[j : j + 1] == "!" and formula[j - 1 : j] == "'":
+                if not formula[i + 1 : j - 1].startswith("["):
+                    spans.append((i, j + 1))
+                i = j + 1
+                continue
+        elif boundary:
+            m = _UNQUOTED_REF.match(formula, i)
+            if m:
+                if not m.group(1):
+                    spans.append((m.start(), m.end()))
+                i = m.end()
+                continue
+        i += 1
+    return spans
+
+
 # 数式を持つ場所. 入力規則（dataValidation の formula1/2）・条件付き書式（cfRule の formula）は、
 # Excel 2010 以降の拡張（extLst の xm:f）にもある
 SHEET_FORMULA_XPATHS = [

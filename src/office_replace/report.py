@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -26,11 +27,16 @@ def _plain(s: str) -> str:
 
 
 def masker(rules: list[Rule]) -> Callable[[str], str]:
-    """レポートの文字列から置換前の文字列を消す関数. すべてのルールを（対象に関係なく）当てて置換後の文字にする."""
+    """レポートの文字列から置換前の文字列を消す関数. すべてのルールを（対象に関係なく）当てて置換後の文字にする.
+
+    完全一致（whole）のルールも、伏せ字では部分一致で当てる. ファイル名（「架空商会.xlsx」）・場所・エラー文の
+    一部に置換前が入っていても伏せるため（完全一致のままだと、文字列の全体が置換前のときしか伏せられない）.
+    """
+    partial = [dataclasses.replace(r, whole=False, _re=None, long_matches=[]) for r in rules]  # 元のルールの警告の記録に混ぜない
 
     def mask(text: str) -> str:
         text = str(text)
-        for r in rules:
+        for r in partial:
             try:
                 text, _ = r.apply(text)
             except (re.error, IndexError):  # 置換後のグループ（\\1 など）の誤りは、文字ごと伏せる
