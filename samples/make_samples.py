@@ -2,7 +2,8 @@
 
     python samples/make_samples.py            # samples/input/ と samples/rules.* を作る
 
-- input/見積書_サンプル商事.xlsx   セル・図形（テキストボックス）・シート名・シートを参照する数式
+- input/見積書_サンプル商事.xlsx   セル・図形（テキストボックス）・シート名・シートを参照する数式・ヘッダー/フッター・
+                                  テーブル（見出しに社名を含む列と、その列を参照する数式）
 - input/提案書_サンプル商事.docx   本文（書式の違うランに分かれた文字列を含む）・表・ヘッダー
 - input/sub/説明資料_サンプル商事.pptx  スライドの図形・表・ノート
 - input/旧形式.xls                 古い形式（対象外として報告される）
@@ -13,11 +14,13 @@ from __future__ import annotations
 
 import csv
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
 from docx import Document
 from openpyxl import Workbook
+from openpyxl.worksheet.table import Table
 from pptx import Presentation
 from pptx.util import Inches, Pt
 
@@ -87,6 +90,14 @@ def make_xlsx(path: Path) -> None:
     summary["A1"] = "見積合計"
     summary["B1"] = "='サンプル商事向け'!B9"
     summary["A2"] = "サンプル商事"
+    ws.oddHeader.center.text = "サンプル商事 御見積"
+    # テーブル: 見出しを置換すると、テーブルの列名と構造化参照も合わせて直す
+    summary["D1"], summary["E1"] = "サンプル商事の窓口", "内線"
+    summary["D2"], summary["E2"] = "営業部", "1001"
+    summary["D3"], summary["E3"] = "経理部", "1002"
+    summary.add_table(Table(displayName="窓口一覧", ref="D1:E3"))
+    summary["A3"] = "窓口の数"
+    summary["B3"] = "=COUNTA(窓口一覧[サンプル商事の窓口])"
     wb.save(path)
     add_textbox_to_xlsx(path)
 
@@ -154,5 +165,8 @@ def generate(out: Path) -> list[Path]:
 
 
 if __name__ == "__main__":
+    # Windows の CI など、標準出力が日本語を出せない文字コード（cp1252）でも落ちないように
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     for p in generate(HERE):
         print(p)

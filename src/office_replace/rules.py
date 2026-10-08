@@ -1,20 +1,24 @@
 """置換のルール（置換前 → 置換後）. 置換前には * と ? のワイルドカードが使える.
 
 - `*` は 0 文字以上、`?` は 1 文字（Excel の検索と同じ）。`~*` `~?` `~~` で記号そのもの
+  - `*` は Excel と同じく **できるだけ長く** 一致する（`見積*` は「見積書A」の全体に一致する）。改行もまたぐ
 - `--regex` のときは置換前を正規表現として扱い、置換後で \\1 などのグループを使える
-- 対象（targets）: text（セル・図形・本文など）/ sheet（シート名）/ file（ファイル名）。既定は text
+- 対象（targets）: text（セル・図形・本文など）/ sheet（シート名）/ file（ファイル名）/ formula（Excel の数式の中の文字列）。既定は text
+  - `all`（すべて）は text・sheet・file。formula は明示したときだけ（数式を書き換えるため）
 """
 
 from __future__ import annotations
 
 import csv
+import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-TARGETS = ("text", "sheet", "file")
+TARGETS = ("text", "sheet", "file", "formula")
+ALL_TARGETS = ("text", "sheet", "file")  # 「すべて」で選ばれるもの（formula は明示したときだけ）
 _TARGET_ALIASES = {
     "文字列": "text",
     "テキスト": "text",
@@ -22,6 +26,8 @@ _TARGET_ALIASES = {
     "シート": "sheet",
     "ファイル名": "file",
     "ファイル": "file",
+    "数式": "formula",
+    "数式の文字列": "formula",
     "すべて": "all",
     "all": "all",
 }
@@ -35,7 +41,8 @@ def wildcard_to_regex(pattern: str) -> str:
             out.append(re.escape(pattern[i + 1]))
             i += 2
             continue
-        out.append(".*?" if ch == "*" else "." if ch == "?" else re.escape(ch))
+        # * は Excel と同じく最長一致（.*）. 改行もまたぐよう、compiled() で DOTALL を付ける
+        out.append(".*" if ch == "*" else "." if ch == "?" else re.escape(ch))
         i += 1
     return "".join(out)
 
@@ -55,7 +62,8 @@ class Rule:
             body = self.before if self.regex else wildcard_to_regex(self.before)
             if self.whole:
                 body = rf"\A(?:{body})\Z"
-            self._re = re.compile(body, re.I if self.ignore_case else 0)
+            flags = (re.I if self.ignore_case else 0) | (0 if self.regex else re.S)
+            self._re = re.compile(body, flags)
         return self._re
 
     def apply(self, text: str) -> tuple[str, int]:
@@ -82,7 +90,7 @@ def validate(rules: list[Rule]) -> list[str]:
             problems.append(f"ルール {i}: 空文字に一致するパターンです（{r.before}）")
         bad = [t for t in r.targets if t not in TARGETS]
         if bad:
-            problems.append(f"ルール {i}: 対象 {bad} は text / sheet / file のどれかです")
+            problems.append(f"ルール {i}: 対象 {bad} は text / sheet / file / formula のどれかです")
     return problems
 
 
@@ -93,7 +101,7 @@ def _targets(value: str) -> tuple[str, ...]:
     out: list[str] = []
     for p in parts:
         t = _TARGET_ALIASES.get(p, _TARGET_ALIASES.get(p.lower(), p.lower()))
-        out += list(TARGETS) if t == "all" else [t]
+        out += list(ALL_TARGETS) if t == "all" else [t]
     return tuple(dict.fromkeys(out))
 
 
@@ -134,14 +142,20 @@ def load(path: Path, *, regex: bool = False, ignore_case: bool = False) -> list[
                 continue
         if text is None:
             raise ValueError(f"{path.name}: 文字コードを判別できません（UTF-8 か Shift_JIS）")
-        rows = list(csv.DictReader(text.splitlines(), delimiter="\t" if suffix != ".csv" else ","))
+        # 改行を含むセル（"A<改行>B"）を壊さないよう、行に分けずにそのまま渡す
+        rows = list(csv.DictReader(io.StringIO(text, newline=""), delimiter="\t" if suffix != ".csv" else ","))
     elif suffix in (".xlsx", ".xlsm"):
+        from devtools_common.excel import render_cell
         from openpyxl import load_workbook
 
-        ws = load_workbook(path, read_only=True, data_only=True).worksheets[0]
-        it = ws.iter_rows(values_only=True)
-        header = [str(h or "").strip() for h in next(it, [])]
-        rows = [{h: ("" if v is None else str(v)) for h, v in zip(header, r, strict=False)} for r in it]
+        # 数値のセルは表示どおりの文字列で読む（表示形式 000 の 1 は「001」、1.0 は「1」）
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            it = wb.worksheets[0].iter_rows()
+            header = [render_cell(c)[0].strip() for c in next(it, ())]
+            rows = [{h: render_cell(c)[0] for h, c in zip(header, r, strict=False)} for r in it]
+        finally:
+            wb.close()
     else:
         raise ValueError(f"ルールの形式に対応していません（.csv / .tsv / .xlsx / .yaml）: {path.name}")
     rules = [r for r in (_row_rule(row, regex=regex, ignore_case=ignore_case) for row in rows) if r]
