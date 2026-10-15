@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import leftover, processors
-from .ooxml import Change, Package, UnsafeZipError, ZipLimits
+from .ooxml import BrokenOutputError, Change, Package, UnsafeZipError, ZipLimits
 
 __all__ = ["FileResult", "Options", "ZipLimits", "process_file", "run"]
 from .rules import LONG_MATCH, Rule
@@ -113,7 +113,14 @@ def process_file(path: Path, rel: Path, out_dir: Path, rules: list[Rule], opt: O
     try:
         text_rules = _for(rules, "text")
         if suffix in EXCEL:
-            ch, errs = processors.excel(pkg, text_rules, _for(rules, "sheet"), _for(rules, "formula"))
+            try:
+                ch, errs = processors.excel(pkg, text_rules, _for(rules, "sheet"), _for(rules, "formula"))
+            except BrokenOutputError as e:
+                # 壊れたファイルを出力しない（出力先に何も書かない. 残りの確認もしない）
+                result.status = "error"
+                result.dest = None
+                result.messages.append(str(e))
+                return result
             result.changes += ch
             result.messages += errs
         elif suffix in WORD:

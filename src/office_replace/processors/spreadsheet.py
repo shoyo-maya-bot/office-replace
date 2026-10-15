@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from lxml import etree
 
-from ..ooxml import NS, Change, Package, set_text
+from ..ooxml import NS, BrokenOutputError, Change, Package, set_text
 from ..rules import Rule
 from ..sheetname import check_sheet_name
 from ..textruns import replace_all
@@ -186,27 +186,33 @@ def _excel_tables(pkg: Package, sheets, rules: list[Rule]) -> tuple[list[Change]
         tname = root.get("displayName") or root.get("name", "")
         sheet = owner.get(part, "")
         cols = root.findall("s:tableColumns/s:tableColumn", NS)
-        mapping: dict[str, str] = {}
+        # 置換後の列名を先に求め、重複する（Excel が修復を求める壊れたファイルになる）なら、このファイルは出力しない
+        planned: list[tuple[etree._Element, str, str, int]] = []
         for col in cols:
             old = col.get("name", "")
             new, count = _apply_simple(rules, old)
             if count and new != old:
-                col.set("name", new)
-                mapping[old.casefold()] = new
-                pkg.touch(part)
-                changes.append(Change(pkg.path.name, "text", f"{sheet} テーブル「{tname}」の列名", _short(old), _short(new), count))
-            label = col.get("totalsRowLabel")
-            if label:
-                changes += _replace_value(pkg, part, col, rules, f"{sheet} テーブル「{tname}」の集計行", attr="totalsRowLabel")
-        seen: dict[str, str] = {}
+                planned.append((col, old, new, count))
+        if planned:
+            new_names = {id(c): n for c, _, n, _ in planned}
+            seen: set[str] = set()
+            for col in cols:
+                name = new_names.get(id(col), col.get("name") or "")
+                if name.casefold() in seen:
+                    raise BrokenOutputError(
+                        f"テーブル「{tname}」の列名が置換で重複します（{name}）. "
+                        "Excel で開くと修復が必要なファイルになるため、このファイルは出力しません。置換表を見直してください"
+                    )
+                seen.add(name.casefold())
+        mapping: dict[str, str] = {}
+        for col, old, new, count in planned:
+            col.set("name", new)
+            mapping[old.casefold()] = new
+            pkg.touch(part)
+            changes.append(Change(pkg.path.name, "text", f"{sheet} テーブル「{tname}」の列名", _short(old), _short(new), count))
         for col in cols:
-            key = (col.get("name") or "").casefold()
-            if key in seen:
-                errors.append(
-                    f"{pkg.path.name}: テーブル「{tname}」の列名が置換で重複します（{col.get('name')}）. "
-                    "Excel で開くと修復が必要になります。置換表を見直してください"
-                )
-            seen[key] = col.get("name", "")
+            if col.get("totalsRowLabel"):
+                changes += _replace_value(pkg, part, col, rules, f"{sheet} テーブル「{tname}」の集計行", attr="totalsRowLabel")
         if mapping:
             renames[tname.casefold()] = mapping
     if renames:
