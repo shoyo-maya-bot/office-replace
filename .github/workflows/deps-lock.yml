@@ -2,6 +2,8 @@
 #
 # - main 以外のブランチで pyproject.toml（またはこのファイル）を変えて push したとき、または手で動かしたときに走る
 # - pyproject.toml（dev を含む）から、uv（版を固定）で Windows・Linux の両方に効く constraints.txt を作る
+# - あわせて、実行時の依存だけをハッシュ付きで requirements-hashes.txt に書く（版は constraints.txt にそろえる）.
+#   constraints.txt にはハッシュを入れない（ハッシュがあると pip がハッシュ確認モードになり、pip install -e . と git の依存が入らなくなる）
 # - git の URL で入れる依存（devtools-common）は constraints に書けない（pip が受け付けない）ので除く. その版は pyproject.toml の SHA で固定済み
 # - 変わっていれば同じブランチにコミットして push する. GITHUB_TOKEN のコミットでは CI が走らないので、次の変更を push して CI を回す
 name: deps-lock
@@ -44,11 +46,17 @@ jobs:
             --no-header --no-annotate -o constraints.txt
           sed -i '1i # 自動生成（.github/workflows/deps-lock.yml）. 手で書き換えない. pip install -c constraints.txt で使う' constraints.txt
           cat constraints.txt
+      - name: requirements-hashes.txt を作る（実行時の依存・ハッシュ付き）
+        run: |
+          uv pip compile pyproject.toml -c constraints.txt \
+            --universal --python-version 3.12 --no-emit-package devtools-common --generate-hashes \
+            --no-header --no-annotate -o requirements-hashes.txt
+          sed -i '1i # 自動生成（.github/workflows/deps-lock.yml）. 手で書き換えない. ハッシュ付き（実行時の依存だけ）. 使い方は README の「ハッシュを確かめて入れる」' requirements-hashes.txt
       - name: 変わっていればコミットして push する
         run: |
-          git add constraints.txt
+          git add constraints.txt requirements-hashes.txt
           if git diff --cached --quiet; then echo "変更なし"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "依存: constraints.txt を更新（deps-lock）"
+          git commit -m "依存: constraints.txt / requirements-hashes.txt を更新（deps-lock）"
           git push origin "HEAD:${GITHUB_REF_NAME}"
