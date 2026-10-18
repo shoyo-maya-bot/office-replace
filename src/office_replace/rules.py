@@ -186,6 +186,25 @@ def _row_rule(row: dict[str, str], *, regex: bool, ignore_case: bool) -> Rule | 
     )
 
 
+_YAML_SHAPE = "rules: の下に「- 置換前: … / 置換後: …」の形のリストで書いてください"
+
+
+def _yaml_rows(name: str, data: object) -> list[dict[str, str]]:
+    """YAML の中身をルールの行（dict）のリストにする. 形が違えば ValueError（置換表の誤り＝終了コード 2）."""
+    rows = data.get("rules", data) if isinstance(data, dict) else data
+    if not rows:  # 空のファイル・rules: だけ → 呼び出し側の「ルールがありません」
+        return []
+    if isinstance(rows, dict):
+        # トップ（または rules:）が 1 件のマッピング. 1 件だけでもリストにする（- を付ける）
+        raise ValueError(f"{name}: ルールがリストになっていません（{_YAML_SHAPE}）")
+    if not isinstance(rows, list):
+        raise ValueError(f"{name}: ルールの形が違います（{_YAML_SHAPE}）")
+    for i, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"{name}: {i} 件目のルールが「置換前: …」の組になっていません（{_YAML_SHAPE}）")
+    return rows
+
+
 def load(path: Path, *, regex: bool = False, ignore_case: bool = False) -> list[Rule]:
     """ルールの一覧（.csv / .tsv / .xlsx / .yaml）. 列: 置換前・置換後・対象（任意）・完全一致（任意）."""
     suffix = path.suffix.lower()
@@ -193,7 +212,7 @@ def load(path: Path, *, regex: bool = False, ignore_case: bool = False) -> list[
     if suffix in (".yaml", ".yml"):
         # 値は書いたとおりの文字列で読む（0123 を 83、no を False にしない）
         data = _load_yaml_strings(path.read_text(encoding="utf-8-sig")) or {}
-        rows = data.get("rules", data) if isinstance(data, dict) else data
+        rows = _yaml_rows(path.name, data)
     elif suffix in (".csv", ".tsv", ".txt"):
         text = None
         for enc in ("utf-8-sig", "cp932"):

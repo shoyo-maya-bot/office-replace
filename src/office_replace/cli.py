@@ -4,7 +4,9 @@
   office-replace 入力フォルダ -o 出力フォルダ --rules rules.xlsx -r          # 置換表で一括・サブフォルダも
   office-replace 入力フォルダ --rules rules.csv --dry-run                    # 書き換えずに、置換される箇所だけ確認
 
-元のファイルは書き換えません（出力フォルダに書き出す）。置換前には * と ? が使えます（--regex で正規表現）。
+元のファイルは書き換えません（出力フォルダに書き出す）。出力フォルダは入力フォルダ（入力がファイルならそのフォルダ）の外に。
+出力フォルダに今回書き出していないファイル（前回の出力の残りなど）があれば警告します（空の出力フォルダを推奨）。
+置換前には * と ? が使えます（--regex で正規表現）。
 レポート: 出力フォルダと同じ階層の <出力フォルダ名>_report/office-replace-report.md / .xlsx
   （出力フォルダを共有しても置換前の文字列が漏れないよう、出力フォルダの外に置く。--report で場所を指定、--mask-report で伏せる）
 終了コード: 0 正常 / 1 エラーのあったファイルあり、または置換前の文字列が残っている（--allow-leftover で 0）
@@ -31,7 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=TOOL, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("input", type=Path, help="入力フォルダ（またはファイル）")
-    p.add_argument("-o", "--out", type=Path, help="出力フォルダ（--dry-run 以外は必須。入力フォルダの中は不可）")
+    p.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        help="出力フォルダ（--dry-run 以外は必須。入力フォルダの中は不可。入力がファイルのときは、そのファイルのあるフォルダの中も不可）",
+    )
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--rules", type=Path, help="置換表（.xlsx / .csv / .tsv / .yaml。列: 置換前・置換後・対象・完全一致）")
     g.add_argument("--from", dest="before", help="置換前（1 組だけのとき）")
@@ -123,7 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         src_dir = (args.input if args.input.is_dir() else args.input.parent).resolve()
         out = args.out.resolve()
         if out == src_dir or src_dir in out.parents:
-            raise common_cli.UsageError("出力フォルダを入力フォルダの中にはできません（次回の実行で二重に置換されるため）")
+            where = "入力フォルダ" if args.input.is_dir() else f"入力ファイルのあるフォルダ（{src_dir.name}）"
+            raise common_cli.UsageError(f"出力フォルダを{where}の中にはできません（次回の実行で二重に置換されるため）")
     out_dir = args.out or Path("_dry_run")
     report_md = args.report or (None if args.dry_run else default_report(out_dir))
     if report_md and not args.dry_run and _inside(report_md, out_dir):
@@ -167,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
         print(left_note.strip())
     if report_md:
         print(f"レポート: {report_md} / {report_md.with_suffix('.xlsx')}")
+    if not args.dry_run:
+        _warn_stale(out_dir, results, report_md)
     has_error = any(r.status == "error" or (r.messages and r.status == "changed") for r in results)
     has_leftover = bool(s["残り"]) and not args.allow_leftover
     return common_cli.ExitCode.FINDINGS if has_error or has_leftover else common_cli.ExitCode.OK
@@ -176,6 +186,37 @@ def default_report(out_dir: Path) -> Path:
     """既定のレポートの場所: 出力フォルダと同じ階層の <出力フォルダ名>_report/（出力フォルダを共有しても漏れないように）."""
     out = out_dir.resolve()
     return out.parent / f"{out.name}_report" / "office-replace-report.md"
+
+
+STALE_SHOW = 5
+
+
+def stale_outputs(out_dir: Path, results: list[engine.FileResult], report_md: Path | None) -> list[Path]:
+    """出力フォルダにあるが、今回書き出していないファイル（前回の出力の残りなど）. 出力フォルダからの相対パス.
+
+    前回の置換表で書き出したファイルや、今回は置換が無かったファイルの前回の出力が残っていると、
+    出力フォルダを共有したときに置換前の文字列が漏れるため、警告に使う.
+    """
+    if not out_dir.is_dir():
+        return []
+    written = {r.dest.resolve() for r in results if r.dest is not None}
+    if report_md:
+        written |= {report_md.resolve(), report_md.with_suffix(".xlsx").resolve()}
+    base = out_dir.resolve()
+    return sorted(p.relative_to(base) for p in base.rglob("*") if p.is_file() and p.resolve() not in written)
+
+
+def _warn_stale(out_dir: Path, results: list[engine.FileResult], report_md: Path | None) -> None:
+    stale = stale_outputs(out_dir, results, report_md)
+    if not stale:
+        return
+    names = "\n  ".join(p.as_posix() for p in stale[:STALE_SHOW])
+    more = f"\n  …ほか {len(stale) - STALE_SHOW} 件" if len(stale) > STALE_SHOW else ""
+    print(
+        f"警告: 出力フォルダに、今回書き出していないファイルが {len(stale)} 件あります（前回の出力の残りなど）。"
+        "置換前の文字列が入っている場合があるので、共有する前に確認するか、空の出力フォルダで実行し直してください:\n  " + names + more,
+        file=sys.stderr,
+    )
 
 
 def _inside(path: Path, folder: Path) -> bool:
