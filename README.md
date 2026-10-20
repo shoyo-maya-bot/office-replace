@@ -121,7 +121,7 @@ rules:
 
 | オプション | 意味 |
 |---|---|
-| `-o DIR` | 出力フォルダ（入力フォルダの中は不可） |
+| `-o DIR` | 出力フォルダ（入力フォルダの中は不可。入力が 1 ファイルのときは、**そのファイルのあるフォルダの中も不可**。例: `office-replace docs/見積.xlsx -o docs/out` は誤り、`-o out` などフォルダの外に）。空のフォルダを推奨（下の「出力フォルダの前回の残り」） |
 | `-r` | サブフォルダも対象（出力にも同じ構成で書き出す） |
 | `--dry-run` | 書き換えずにレポートだけ（`--report FILE.md` で保存） |
 | `--report FILE.md` | レポートの場所（同じ名前の .xlsx も作る）。既定は出力フォルダと同じ階層の `<出力フォルダ名>_report/` |
@@ -144,6 +144,12 @@ rules:
 - レポートも渡すときは `--mask-report` を付けます（置換前は「（伏せ字）」、ファイル名・シート名は置換後の名前になります）
 - `--report` で出力フォルダの中を指定したときは警告を出します
 
+### 出力フォルダの前回の残り
+
+同じ出力フォルダで実行し直すと、前回書き出したファイルは消しません（今回置換の無かったファイルや、置換表を変えて名前が変わったファイルの前回の出力が残ります）。
+残ったファイルには置換前の文字列が入っていることがあるので、今回書き出していないファイルが出力フォルダにあれば、件数と名前（先頭 5 件）を標準エラーに警告します（終了コードは変えません）。
+共有する前に確認するか、空の出力フォルダで実行し直してください。
+
 ## 対象外
 
 - 古い形式（.xls / .doc / .ppt）: レポートに一覧を出します。新しい形式で保存し直してください
@@ -164,7 +170,20 @@ ruff check . && ruff format --check . && pytest
 ```
 
 - 依存の版は `constraints.txt` でそろえます（`pip install -c constraints.txt -e ".[dev]"`。GitHub Actions の deps-lock が作る）
-- CI: Linux と Windows のテスト、LibreOffice で置換後のサンプルを開けるか（PDF に変換）、bandit・pip-audit
+- CI: Linux と Windows のテスト、LibreOffice で置換後のサンプルを開けるか（PDF に変換）、bandit・pip-audit（ハッシュを確かめて入れた依存で）
+
+### ハッシュを確かめて入れる
+
+`constraints.txt` は版だけを固定します（ハッシュを入れると `pip install -e .` と git の依存が入らなくなるため）。
+配布物の改ざんも確かめたいときは、実行時の依存をハッシュ付きの `requirements-hashes.txt`（deps-lock が `constraints.txt` と同じ版で作る）から入れます。
+
+```bash
+pip install --require-hashes -r requirements-hashes.txt
+pip install --no-deps -e . "devtools-common @ git+https://github.com/shoyo-maya-bot/devtools-common.git@<pyproject.toml の SHA>"
+pip check
+```
+
+`setup.sh` / `setup.cmd` は今までどおり `constraints.txt` を使います（開発用の依存も入れるため）。
 
 構成: `rules.py`（置換表・ワイルドカード）→ `engine.py`（フォルダの走査・出力）→ `processors/`（形式ごと: `spreadsheet.py` Excel・`formula.py` 数式・`wordprocessing.py` Word・`presentation.py` PowerPoint・`docprops.py` 文書のプロパティ）→
 `textruns.py`（書式の切れ目をまたぐ置換）/ `ooxml.py`（zip と XML の読み書き）→ `leftover.py`（残りの確認）→ `report.py`
