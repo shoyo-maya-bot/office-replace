@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from lxml import etree
 
 from ..ooxml import NS, BrokenOutputError, Change, Package, set_text
@@ -154,17 +156,77 @@ _HF = {
     "firstHeader": "先頭ページのヘッダー",
     "firstFooter": "先頭ページのフッター",
 }
+HEADER_FOOTER_TAGS = frozenset(_HF)
+
+
+# 書式コード（& の後ろ）. && は文字の & なので、ここには入れない（hf_pieces で文字として扱う）
+_HF_CODE = re.compile(
+    r"&(?:"
+    r'"[^"]*"?'  # &"フォント名,スタイル"
+    r"|K(?:[0-9A-Fa-f]{6}|\d{2}[ST+\-]\d{3})"  # &K 文字の色（RGB / テーマの色）
+    r"|[PN][+\-]\d+"  # &P+1 など（ページ番号の足し引き）
+    r"|\d{1,3}"  # &12 文字の大きさ
+    r"|[LCRPNDTZFAGBIUESXYOH]"  # 位置・ページ番号・日付・ファイル名・シート名・図・太字などの切り替え
+    r"|.?"  # 知らない書式（壊さずにそのまま残す）
+    r")",
+    re.S | re.I,
+)
+
+
+def hf_pieces(value: str) -> tuple[list[str], set[int]]:
+    """ヘッダー・フッターの文字列 → (文字と書式コードの並び, 書式コードの番号). 文字の && は & にする."""
+    pieces: list[str] = []
+    fixed: set[int] = set()
+    buf: list[str] = []
+    i = 0
+    while i < len(value):
+        if value.startswith("&&", i):
+            buf.append("&")
+            i += 2
+        elif value[i] == "&":
+            m = _HF_CODE.match(value, i)  # 末尾の .? があるので必ず一致する
+            code = m.group() if m else value[i]
+            if buf:
+                pieces.append("".join(buf))
+                buf = []
+            fixed.add(len(pieces))
+            pieces.append(code)
+            i += len(code)
+        else:
+            buf.append(value[i])
+            i += 1
+    if buf:
+        pieces.append("".join(buf))
+    return pieces, fixed
+
+
+def _replace_header_footer(pkg: Package, part: str, el: etree._Element, rules: list[Rule], location: str) -> list[Change]:
+    """書式コード（&L・&P・&"ＭＳ ゴシック,太字"・&12 など）は残し、間の文字だけを置換する.
+
+    一致は書式コードをまたがない（* も）. 置換後の文字の & は && にする（&P などの書式として読まれないように）.
+    """
+    old = el.text
+    if not old:
+        return []
+    pieces, fixed = hf_pieces(old)
+    new_pieces, count = replace_all(pieces, rules, fixed)
+    if not count:
+        return []
+    new = "".join(t if k in fixed else t.replace("&", "&&") for k, t in enumerate(new_pieces))
+    set_text(el, new)
+    pkg.touch(part)
+    return [Change(pkg.path.name, "text", location, _short(old), _short(new), count)]
 
 
 def _excel_header_footer(pkg: Package, sheets, rules: list[Rule]) -> list[Change]:
-    """印刷のヘッダー・フッター（&L&C&R などの書式コードはそのまま、文字だけを置換する）."""
+    """印刷のヘッダー・フッター（&L&C&R・&P などの書式コードはそのまま、文字だけを置換する）."""
     changes: list[Change] = []
     for name, part, _ in sheets:
         if not pkg.has(part):
             continue
         for tag, label in _HF.items():
             for el in pkg.xml(part).getroot().iterfind(f"s:headerFooter/s:{tag}", NS):
-                changes += _replace_value(pkg, part, el, rules, f"{name} {label}")
+                changes += _replace_header_footer(pkg, part, el, rules, f"{name} {label}")
     return changes
 
 
