@@ -12,6 +12,6 @@ echo 完了: .venv\Scripts\activate のあと office-replace --help
 pause
 exit /b 0
 :err
-echo セットアップに失敗しました。Python 3.12 と Git が入っているか確認してください。
+echo セットアップに失敗しました。Python 3.12 以上と Git が入っているか確認してください。
 pause
 exit /b 1

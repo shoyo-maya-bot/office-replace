@@ -26,6 +26,7 @@ from lxml import etree
 
 from .ooxml import _PARSER, UnsafeZipError, ZipLimits, check_zip
 from .processors.formula import sheet_ref_spans
+from .processors.spreadsheet import HEADER_FOOTER_TAGS, hf_pieces
 from .rules import Rule
 
 RULE_ID = "replace.leftover"
@@ -253,7 +254,11 @@ def _strings(data: bytes, tree: etree._ElementTree | None, part: str = "") -> li
             if name is None:
                 continue
             number = el.getparent() is not None and el.getparent().get("t") not in _TEXT_TYPES
-        if el.text:
+        if sheet and name in HEADER_FOOTER_TAGS and el.text:
+            # ヘッダー・フッターは書式コード（&P・&D など）を除いた文字だけを調べる（置換と同じ区切り. && は & として）
+            pieces, fixed = hf_pieces(el.text)
+            out += [(name, t) for k, t in enumerate(pieces) if k not in fixed]
+        elif el.text:
             out.append((name, _Number(el.text) if number else el.text))
         if el.tail and el.tail.strip():
             out.append((name, el.tail))
