@@ -42,11 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--rules", type=Path, help="置換表（.xlsx / .csv / .tsv / .yaml。列: 置換前・置換後・対象・完全一致）")
     g.add_argument("--from", dest="before", help="置換前（1 組だけのとき）")
-    p.add_argument("--to", dest="after", default="", help="置換後（--from と組で使う）")
+    p.add_argument("--to", dest="after", default=None, help="置換後（--from と組で使う。省略すると空＝削除）")
     p.add_argument(
         "--target",
-        default="text",
-        help="--from の対象: text / sheet / file / formula（Excel の数式の中の文字列）/ all（text・sheet・file）。カンマ区切り可",
+        default=None,
+        help="--from の対象: text（既定）/ sheet / file / formula（Excel の数式の中の文字列）/ all（text・sheet・file）。カンマ区切り可",
     )
     p.add_argument("-r", "--recursive", action="store_true", help="サブフォルダも対象にする")
     p.add_argument("--regex", action="store_true", help="置換前を正規表現として扱う")
@@ -102,6 +102,14 @@ def _positive(kind):
 
 def _rules(args) -> list[Rule]:
     if args.rules:
+        ignored = [o for o, v in (("--to", args.after is not None), ("--target", args.target is not None), ("--whole", args.whole)) if v]
+        if ignored:
+            # 以前は黙って無視していた. 互換のためエラーにはせず、使われないことを知らせる
+            print(
+                f"警告: {' / '.join(ignored)} は --from と組で使うオプションです。--rules のときは使いません"
+                "（置換後・対象・完全一致は置換表の列で指定してください）",
+                file=sys.stderr,
+            )
         if not args.rules.is_file():
             raise common_cli.UsageError(f"置換表が見つかりません: {args.rules}")
         try:
@@ -111,7 +119,7 @@ def _rules(args) -> list[Rule]:
     else:
         from .rules import _targets
 
-        rules = [Rule(args.before, args.after, _targets(args.target), args.regex, args.ignore_case, args.whole)]
+        rules = [Rule(args.before, args.after or "", _targets(args.target or "text"), args.regex, args.ignore_case, args.whole)]
     problems = validate(rules)
     if problems:
         raise common_cli.UsageError("置換表の誤り:\n  " + "\n  ".join(problems))

@@ -72,3 +72,45 @@ def test_python_version_matches_requires_python():
     # CI は対応する最も古い版で動かす
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert set(re.findall(r'python-version: "([\d.]+)"', ci)) == {version}
+
+
+def test_version_is_dev_while_changelog_has_unreleased_changes():
+    """CHANGELOG の「未リリース」に変更があるなら、版は .devN（リリース済みの版のままにしない）.
+
+    後退: 0.2.0 をリリースした後も pyproject の版が 0.2.0 のままで、未リリースの変更が入った版と区別できなかった.
+    """
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    released = re.findall(r"^## (\d+\.\d+\.\d+)", changelog, re.M)
+    assert released, "CHANGELOG にリリース済みの版（## 0.2.0 など）がありません"
+    assert version not in released, f"{version} はリリース済みです。次の .devN にしてください"
+    m = re.search(r"^## 未リリース\n(.*?)(?=^## \d)", changelog, re.M | re.S)
+    if m and re.search(r"^- ", m.group(1), re.M):
+        assert re.fullmatch(r"\d+\.\d+\.\d+\.dev\d+", version), f"未リリースの変更があるので .devN にしてください: {version}"
+        assert f"`{version}`" in m.group(1), "「未リリース」の冒頭に今の版を書いてください"
+    # .dev の版は、最新のリリースより後の版であること
+    base = tuple(int(x) for x in version.split(".dev")[0].split("."))
+    assert base > max(tuple(int(x) for x in r.split(".")) for r in released), version
+
+
+def test_setup_scripts_find_supported_python():
+    """setup.sh は requires-python と同じ版を確かめ、Git Bash（.venv/Scripts）でも動く."""
+    spec = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["requires-python"]
+    major, minor = re.fullmatch(r">=\s*(\d+)\.(\d+)", spec).groups()
+    sh = (ROOT / "setup.sh").read_text(encoding="utf-8")
+    assert f"sys.version_info >= ({major}, {minor})" in sh
+    assert f"Python {major}.{minor} 以上" in sh
+    assert ".venv/Scripts/python" in sh and ".venv/bin/python" in sh
+
+
+def test_agent_guides_exit_codes_match_readme():
+    """AGENTS.md と copilot-instructions の終了コードの説明が README と同じ."""
+    line = next(ln for ln in _section("オプション").splitlines() if ln.startswith("終了コード:"))
+    readme = {c: _norm(t) for c, t in re.findall(r"`(\d+)` ([^／]+)", line)}
+    for name in ("AGENTS.md", ".github/copilot-instructions.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        m = re.search(r"終了コード: (.*)", text)
+        assert m, name
+        guide = {c: _norm(t) for c, t in re.findall(r"(\d+) ([^/]+?)(?=\s*/ \d |。|$)", m.group(1))}
+        assert guide == readme, (name, guide, readme)
+    assert (ROOT / "scripts" / "verify_gates.py").is_file()

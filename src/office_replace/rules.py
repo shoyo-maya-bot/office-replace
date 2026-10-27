@@ -2,7 +2,8 @@
 
 - `*` は 0 文字以上、`?` は 1 文字（Excel の検索と同じ）。`~*` `~?` `~~` で記号そのもの
   - `*` は Excel と同じく **できるだけ長く** 一致する（`見積*` は「見積書A」の全体に一致する）
-  - ただし `*` は改行をまたがず、同じ置換前の 2 か所目の始まり（最初の `*` より前の部分）もまたがない.
+  - ただし `*` と `?` は改行・タブをまたがず（Excel のセルの中の改行・タブの文字にも一致しない）、
+    同じ置換前の 2 か所目の始まり（最初の `*` より前の部分）もまたがない.
     「株式会社*支店」は「株式会社A支店と株式会社B支店」の 2 か所に別々に一致する（間の「と」は残る）
   - 一致が長すぎる（LONG_MATCH 文字より長い）ときは、意図しない範囲かもしれないので警告を残す（long_matches）
 - `--regex` のときは置換前を正規表現として扱い、置換後で \\1 などのグループを使える
@@ -76,14 +77,19 @@ def _tokens(pattern: str) -> list[str]:
     return out
 
 
+# ワイルドカードが一致する 1 文字: 改行（\n・\r）とタブ以外. Word・PowerPoint の改行・タブは別のランとして切るが、
+# Excel のセルの文字列には改行・タブがそのまま入るため、ここでも止める（README「タブ・改行はまたがない」）
+_ANY = r"[^\n\r\t]"
+
+
 def _piece(tok: str) -> str:
     if tok == "?":
-        return "."
+        return _ANY
     return re.escape(tok[1:] if tok.startswith("~") else tok)
 
 
 def wildcard_to_regex(pattern: str) -> str:
-    """* と ? を正規表現にする. DOTALL は付けないので、. も * も改行をまたがない.
+    """* と ? を正規表現にする. * も ? も改行・タブをまたがない（_ANY）.
 
     * は最長一致（Excel と同じ）だが、置換前の頭（最初の * より前）が次に現れる位置はまたがない.
     これで 1 段落・1 セルに 2 か所あるとき、1 か所目から 2 か所目の終わりまでを 1 つにまとめて消すことがない.
@@ -92,7 +98,7 @@ def wildcard_to_regex(pattern: str) -> str:
     head_toks = toks[: toks.index("*")] if "*" in toks else []
     # 頭が ? だけ（どの文字にも一致する）なら、止める目印にならないので普通の最長一致
     head = "".join(_piece(t) for t in head_toks) if any(t != "?" for t in head_toks) else ""
-    star = f"(?:(?!{head}).)*" if head else ".*"
+    star = f"(?:(?!{head}){_ANY})*" if head else f"{_ANY}*"
     return "".join(star if t == "*" else _piece(t) for t in toks)
 
 
